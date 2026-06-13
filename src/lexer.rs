@@ -574,12 +574,17 @@ impl<'a> Lexer<'a> {
     }
 
     fn skip_trivia(&mut self) -> KResult<()> {
+        if self.index == 0 && self.peek_char(0) == Some('\u{feff}') {
+            self.index += '\u{feff}'.len_utf8();
+        }
         loop {
             if self.index == 0
                 && self.line == 1
                 && self.column == 1
                 && self.peek_char(0) == Some('#')
-                && self.peek_char(1) == Some('!')
+                && self
+                    .peek_char(1)
+                    .is_some_and(|next| next.is_whitespace() || next == '!')
             {
                 self.skip_short_comment();
             }

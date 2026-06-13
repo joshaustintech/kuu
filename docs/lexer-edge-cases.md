@@ -5,7 +5,7 @@ Each item is paired with a regression test in `tests/lexer_edge_cases.rs`.
 
 ## Covered Cases
 
-- Shebang lines at the very start of a chunk are skipped.
+- First-line `#` prolog comments, including shebang lines, are skipped.
 - CRLF line endings count as a single newline for spans.
 - Short comments stop at the newline and do not consume the next token.
 - Long-bracket strings report an error when the closing delimiter is missing.
