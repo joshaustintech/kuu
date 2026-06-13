@@ -10,10 +10,12 @@
 )]
 
 pub mod error;
+pub mod lexer;
 
 #[cfg(test)]
 mod tests {
     use super::error::{KError, KErrorKind, KSpan};
+    use super::lexer::{Keyword, Lexer, TokenKind};
     use std::io;
 
     #[test]
@@ -42,5 +44,38 @@ mod tests {
         let err = KError::runtime("bad value", span);
 
         assert_eq!(err.to_string(), "runtime error at 3:4-3:9: bad value");
+    }
+
+    #[test]
+    fn lexer_smoke_test() {
+        let mut lexer = Lexer::new("global answer = 42");
+
+        let first = lexer.next_token();
+        assert!(first.is_ok());
+        let first = if let Ok(token) = first { token } else { return };
+        assert_eq!(first.kind, TokenKind::Keyword(Keyword::Global));
+
+        let second = lexer.next_token();
+        assert!(second.is_ok());
+        let second = if let Ok(token) = second {
+            token
+        } else {
+            return;
+        };
+        assert_eq!(second.kind, TokenKind::Name("answer".to_owned()));
+
+        let third = lexer.next_token();
+        assert!(third.is_ok());
+        let third = if let Ok(token) = third { token } else { return };
+        assert_eq!(third.kind, TokenKind::Assign);
+
+        let fourth = lexer.next_token();
+        assert!(fourth.is_ok());
+        let fourth = if let Ok(token) = fourth {
+            token
+        } else {
+            return;
+        };
+        assert_eq!(fourth.kind, TokenKind::Integer("42".to_owned()));
     }
 }
