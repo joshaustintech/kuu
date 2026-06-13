@@ -1,6 +1,6 @@
 mod parser_support;
 
-use parser_support::assert_snapshot;
+use parser_support::{assert_chunk_parses, assert_snapshot};
 
 #[test]
 fn globals_labels_and_methods_snapshot() -> Result<(), String> {
@@ -16,6 +16,12 @@ fn tables_and_calls_snapshot() -> Result<(), String> {
         "return { [f(1)] = g; \"x\", x = 1, f(x), [30] = 23; 45 }, foo(bar), foo{1,2}, foo\"hi\"",
         "Chunk\n  Block span=1:1-1:83\n    Return span=1:1-1:83\n      Table span=1:8-1:54\n        TableConstructor span=1:8-1:54\n          KeyedField span=1:10-1:19\n            Call span=1:11-1:14\n              CallExpr span=1:11-1:14 method=None\n                Name span=1:11-1:11 name=f\n                Number span=1:13-1:13 lexeme=1\n            Name span=1:19-1:19 name=g\n          ArrayField span=1:22-1:24\n            String span=1:22-1:24 bytes=[120]\n          NamedField span=1:27-1:31 name=x\n            Number span=1:31-1:31 lexeme=1\n          ArrayField span=1:34-1:37\n            Call span=1:34-1:37\n              CallExpr span=1:34-1:37 method=None\n                Name span=1:34-1:34 name=f\n                Name span=1:36-1:36 name=x\n          KeyedField span=1:40-1:48\n            Number span=1:41-1:42 lexeme=30\n            Number span=1:47-1:48 lexeme=23\n          ArrayField span=1:51-1:52\n            Number span=1:51-1:52 lexeme=45\n      Call span=1:57-1:64\n        CallExpr span=1:57-1:64 method=None\n          Name span=1:57-1:59 name=foo\n          Name span=1:61-1:63 name=bar\n      Call span=1:67-1:74\n        CallExpr span=1:67-1:74 method=None\n          Name span=1:67-1:69 name=foo\n          Table span=1:70-1:74\n            TableConstructor span=1:70-1:74\n              ArrayField span=1:71-1:71\n                Number span=1:71-1:71 lexeme=1\n              ArrayField span=1:73-1:73\n                Number span=1:73-1:73 lexeme=2\n      Call span=1:77-1:83\n        CallExpr span=1:77-1:83 method=None\n          Name span=1:77-1:79 name=foo\n          String span=1:80-1:83 bytes=[104, 105]\n",
     )
+}
+
+#[test]
+fn const_and_close_table_fields_parse() -> Result<(), String> {
+    assert_chunk_parses("return { const = 1, close = 2 }")?;
+    Ok(())
 }
 
 #[test]

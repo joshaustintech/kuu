@@ -1,6 +1,6 @@
 use crate::ast::{
-    Attribute, AttributedName, BinaryOp, Block, CallExpr, Chunk, Expr, FunctionBody,
-    FunctionName, Param, ReturnStmt, Stmt, TableConstructor, TableField, UnaryOp, Var, VarKind,
+    Attribute, AttributedName, BinaryOp, Block, CallExpr, Chunk, Expr, FunctionBody, FunctionName,
+    Param, ReturnStmt, Stmt, TableConstructor, TableField, UnaryOp, Var, VarKind,
 };
 use crate::error::{KError, KResult, KSpan};
 use crate::lexer::{Keyword, Lexer, Token, TokenKind};
@@ -214,7 +214,12 @@ impl<'a> Parser<'a> {
     }
 
     fn merge_span(&self, start: KSpan, end: KSpan) -> KSpan {
-        KSpan::new(start.start_line, start.start_column, end.end_line, end.end_column)
+        KSpan::new(
+            start.start_line,
+            start.start_column,
+            end.end_line,
+            end.end_column,
+        )
     }
 
     fn stmt_span(&self, stmt: &Stmt) -> KSpan {
@@ -278,28 +283,14 @@ impl<'a> Parser<'a> {
     }
 
     fn consume_name(&mut self) -> KResult<(String, KSpan)> {
-        match &self.current.kind {
-            TokenKind::Name(name) => {
-                let span = self.current.span;
-                let name = name.clone();
-                self.advance()?;
-                Ok((name, span))
-            }
-            TokenKind::Keyword(Keyword::Const) => {
-                let span = self.current.span;
-                self.advance()?;
-                Ok(("const".to_owned(), span))
-            }
-            TokenKind::Keyword(Keyword::Close) => {
-                let span = self.current.span;
-                self.advance()?;
-                Ok(("close".to_owned(), span))
-            }
-            _ => Err(self.error("expected name")),
-        }
+        self.consume_name_like("expected name")
     }
 
     fn consume_attribute_name(&mut self) -> KResult<(String, KSpan)> {
+        self.consume_name_like("expected attribute name")
+    }
+
+    fn consume_name_like(&mut self, error: &'static str) -> KResult<(String, KSpan)> {
         match &self.current.kind {
             TokenKind::Name(name) => {
                 let span = self.current.span;
@@ -317,7 +308,7 @@ impl<'a> Parser<'a> {
                 self.advance()?;
                 Ok(("close".to_owned(), span))
             }
-            _ => Err(self.error("expected attribute name")),
+            _ => Err(self.error(error)),
         }
     }
 
@@ -334,7 +325,11 @@ impl<'a> Parser<'a> {
         let end = if values.is_empty() {
             start
         } else {
-            self.expr_span(values.last().ok_or_else(|| self.error("missing return value"))?)
+            self.expr_span(
+                values
+                    .last()
+                    .ok_or_else(|| self.error("missing return value"))?,
+            )
         };
         if !(self.is_block_stop(BlockStop::Eof)
             || self.is_block_stop(BlockStop::End)
@@ -385,7 +380,7 @@ impl<'a> Parser<'a> {
     fn parse_for_statement(&mut self) -> KResult<Stmt> {
         let start = self.current.span;
         self.consume_keyword(Keyword::For)?;
-        let (name, name_span) = self.consume_name()?;
+        let (name, _) = self.consume_name()?;
 
         if self.at_punct(TokenKind::Assign) {
             self.advance()?;
@@ -422,7 +417,6 @@ impl<'a> Parser<'a> {
         self.consume_keyword(Keyword::Do)?;
         let block = self.parse_block(BlockStop::End)?;
         let end = self.consume_keyword(Keyword::End)?;
-        let _ = name_span;
         Ok(Stmt::GenericFor {
             span: self.merge_span(start, end.span),
             names,
@@ -462,7 +456,8 @@ impl<'a> Parser<'a> {
         } else {
             None
         };
-        let (prefix_attribute, names) = self.parse_attributed_name_list_from(prefix_attribute, true)?;
+        let (prefix_attribute, names) =
+            self.parse_attributed_name_list_from(prefix_attribute, true)?;
         let values = if self.at_punct(TokenKind::Assign) {
             self.advance()?;
             self.parse_expression_list()?
@@ -475,7 +470,11 @@ impl<'a> Parser<'a> {
                 if values.is_empty() {
                     self.attributed_names_end_span(&names)
                 } else {
-                    self.expr_span(values.last().ok_or_else(|| self.error("missing local value"))?)
+                    self.expr_span(
+                        values
+                            .last()
+                            .ok_or_else(|| self.error("missing local value"))?,
+                    )
                 },
             ),
             prefix_attribute,
@@ -516,7 +515,8 @@ impl<'a> Parser<'a> {
             });
         }
 
-        let (_prefix_attribute, names) = self.parse_attributed_name_list_from(prefix_attribute, false)?;
+        let (prefix_attribute, names) =
+            self.parse_attributed_name_list_from(prefix_attribute, false)?;
         let values = if self.at_punct(TokenKind::Assign) {
             self.advance()?;
             self.parse_expression_list()?
@@ -529,10 +529,14 @@ impl<'a> Parser<'a> {
                 if values.is_empty() {
                     self.attributed_names_end_span(&names)
                 } else {
-                    self.expr_span(values.last().ok_or_else(|| self.error("missing global value"))?)
+                    self.expr_span(
+                        values
+                            .last()
+                            .ok_or_else(|| self.error("missing global value"))?,
+                    )
                 },
             ),
-            prefix_attribute: _prefix_attribute,
+            prefix_attribute,
             names,
             values,
         })
@@ -552,7 +556,11 @@ impl<'a> Parser<'a> {
             let values = self.parse_expression_list()?;
             let span = self.merge_span(
                 self.stmt_span_from_var_list(&targets),
-                self.expr_span(values.last().ok_or_else(|| self.error("missing assignment value"))?),
+                self.expr_span(
+                    values
+                        .last()
+                        .ok_or_else(|| self.error("missing assignment value"))?,
+                ),
             );
             return Ok(Stmt::Assign {
                 span,
@@ -591,7 +599,9 @@ impl<'a> Parser<'a> {
         let mut close_count = 0usize;
         let mut prefix_close = false;
 
-        if let Some(attribute) = &prefix_attribute && attribute.name == "close" {
+        if let Some(attribute) = &prefix_attribute
+            && attribute.name == "close"
+        {
             prefix_close = true;
         }
 
@@ -602,7 +612,9 @@ impl<'a> Parser<'a> {
             } else {
                 None
             };
-            if let Some(attr) = &attribute && attr.name == "close" {
+            if let Some(attr) = &attribute
+                && attr.name == "close"
+            {
                 if !allow_close {
                     return Err(self.error("attribute <close> cannot be used on global variables"));
                 }
@@ -716,7 +728,11 @@ impl<'a> Parser<'a> {
     fn attributed_names_end_span(&self, names: &[AttributedName]) -> KSpan {
         names
             .last()
-            .map(|name| name.attribute.as_ref().map_or(name.span, |attribute| attribute.span))
+            .map(|name| {
+                name.attribute
+                    .as_ref()
+                    .map_or(name.span, |attribute| attribute.span)
+            })
             .unwrap_or(self.current.span)
     }
 
@@ -776,7 +792,11 @@ impl<'a> Parser<'a> {
                 span,
                 kind: VarKind::Field { prefix, name },
             }),
-            Expr::Index { span, prefix, index } => Ok(Var {
+            Expr::Index {
+                span,
+                prefix,
+                index,
+            } => Ok(Var {
                 span,
                 kind: VarKind::Index { prefix, index },
             }),
@@ -819,7 +839,10 @@ impl<'a> Parser<'a> {
     fn is_unary_op(&self) -> bool {
         matches!(
             self.current_kind(),
-            TokenKind::Minus | TokenKind::Hash | TokenKind::Tilde | TokenKind::Keyword(Keyword::Not)
+            TokenKind::Minus
+                | TokenKind::Hash
+                | TokenKind::Tilde
+                | TokenKind::Keyword(Keyword::Not)
         )
     }
 
@@ -879,18 +902,12 @@ impl<'a> Parser<'a> {
             TokenKind::Keyword(Keyword::False) => {
                 let span = self.current.span;
                 self.advance()?;
-                Expr::Bool {
-                    span,
-                    value: false,
-                }
+                Expr::Bool { span, value: false }
             }
             TokenKind::Keyword(Keyword::True) => {
                 let span = self.current.span;
                 self.advance()?;
-                Expr::Bool {
-                    span,
-                    value: true,
-                }
+                Expr::Bool { span, value: true }
             }
             TokenKind::Integer(text) | TokenKind::Float(text) => {
                 let span = self.current.span;
@@ -927,9 +944,7 @@ impl<'a> Parser<'a> {
             TokenKind::LBrace => self.parse_table_constructor()?,
             TokenKind::Name(_)
             | TokenKind::Keyword(Keyword::Const)
-            | TokenKind::Keyword(Keyword::Close) => {
-                self.parse_prefix_expression()?
-            }
+            | TokenKind::Keyword(Keyword::Close) => self.parse_prefix_expression()?,
             TokenKind::LParen => self.parse_prefix_expression()?,
             _ => return Err(self.error("expected expression")),
         };
@@ -1001,8 +1016,10 @@ impl<'a> Parser<'a> {
                 continue;
             }
 
-            if matches!(self.current_kind(), TokenKind::LParen | TokenKind::LBrace | TokenKind::String(_))
-            {
+            if matches!(
+                self.current_kind(),
+                TokenKind::LParen | TokenKind::LBrace | TokenKind::String(_)
+            ) {
                 let start = self.expr_span(&expr);
                 let (args, end_span) = self.parse_call_args()?;
                 expr = Expr::Call {
@@ -1063,23 +1080,19 @@ impl<'a> Parser<'a> {
                 self.consume_punct(TokenKind::Assign)?;
                 let value = self.parse_expression(0)?;
                 let span = self.merge_span(field_start, self.expr_span(&value));
-                TableField::Keyed {
-                    span,
-                    key,
-                    value,
-                }
-            } else if matches!(self.current_kind(), TokenKind::Name(_))
-                && matches!(self.next_kind(), TokenKind::Assign)
+                TableField::Keyed { span, key, value }
+            } else if matches!(
+                self.current_kind(),
+                TokenKind::Name(_)
+                    | TokenKind::Keyword(Keyword::Const)
+                    | TokenKind::Keyword(Keyword::Close)
+            ) && matches!(self.next_kind(), TokenKind::Assign)
             {
                 let (name, name_span) = self.consume_name()?;
                 self.consume_punct(TokenKind::Assign)?;
                 let value = self.parse_expression(0)?;
                 let span = self.merge_span(name_span, self.expr_span(&value));
-                TableField::Named {
-                    span,
-                    name,
-                    value,
-                }
+                TableField::Named { span, name, value }
             } else {
                 let value = self.parse_expression(0)?;
                 let span = self.expr_span(&value);

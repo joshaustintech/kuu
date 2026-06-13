@@ -31,3 +31,18 @@ fn invalid_method_statement_is_rejected() -> Result<(), String> {
 fn incomplete_expression_is_rejected() -> Result<(), String> {
     assert_parse_error_contains("a.", "expected name")
 }
+
+#[test]
+fn return_must_end_its_block() -> Result<(), String> {
+    assert_parse_error_contains("do return 1; break end", "last statement")
+}
+
+#[test]
+fn vararg_cannot_be_followed_by_more_parameters() -> Result<(), String> {
+    assert_parse_error_contains("function f(a, ...rest, b) end", "expected")
+}
+
+#[test]
+fn close_attributes_are_rejected_on_globals() -> Result<(), String> {
+    assert_parse_error_contains("global<close> *", "global variables")
+}

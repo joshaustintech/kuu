@@ -166,11 +166,9 @@ impl Stmt {
                 indent_line(indent, out, &format!("CallStmt span={}", span));
                 call.fmt_snapshot(indent + 2, out);
             }
-            Self::Label { span, name } => indent_line(
-                indent,
-                out,
-                &format!("Label span={} name={}", span, name),
-            ),
+            Self::Label { span, name } => {
+                indent_line(indent, out, &format!("Label span={} name={}", span, name))
+            }
             Self::Break { span } => indent_line(indent, out, &format!("Break span={}", span)),
             Self::Goto { span, name } => {
                 indent_line(indent, out, &format!("Goto span={} name={}", span, name))
@@ -220,7 +218,11 @@ impl Stmt {
                 step,
                 block,
             } => {
-                indent_line(indent, out, &format!("NumericFor span={} name={}", span, name));
+                indent_line(
+                    indent,
+                    out,
+                    &format!("NumericFor span={} name={}", span, name),
+                );
                 start.fmt_snapshot(indent + 2, out);
                 end.fmt_snapshot(indent + 2, out);
                 if let Some(step) = step {
@@ -249,11 +251,19 @@ impl Stmt {
                 body.fmt_snapshot(indent + 2, out);
             }
             Self::LocalFunction { span, name, body } => {
-                indent_line(indent, out, &format!("LocalFunction span={} name={}", span, name));
+                indent_line(
+                    indent,
+                    out,
+                    &format!("LocalFunction span={} name={}", span, name),
+                );
                 body.fmt_snapshot(indent + 2, out);
             }
             Self::GlobalFunction { span, name, body } => {
-                indent_line(indent, out, &format!("GlobalFunction span={} name={}", span, name));
+                indent_line(
+                    indent,
+                    out,
+                    &format!("GlobalFunction span={} name={}", span, name),
+                );
                 body.fmt_snapshot(indent + 2, out);
             }
             Self::LocalDecl {
@@ -315,7 +325,10 @@ impl FunctionName {
         indent_line(
             indent,
             out,
-            &format!("FunctionName span={} prefix={:?} method={:?}", self.span, self.prefix, self.method),
+            &format!(
+                "FunctionName span={} prefix={:?} method={:?}",
+                self.span, self.prefix, self.method
+            ),
         );
     }
 }
@@ -354,7 +367,11 @@ pub struct Param {
 
 impl Param {
     fn fmt_snapshot(&self, indent: usize, out: &mut String) {
-        indent_line(indent, out, &format!("Param span={} name={}", self.span, self.name));
+        indent_line(
+            indent,
+            out,
+            &format!("Param span={} name={}", self.span, self.name),
+        );
     }
 }
 
@@ -386,7 +403,11 @@ pub struct Attribute {
 
 impl Attribute {
     fn fmt_snapshot(&self, indent: usize, out: &mut String) {
-        indent_line(indent, out, &format!("Attribute span={} name={}", self.span, self.name));
+        indent_line(
+            indent,
+            out,
+            &format!("Attribute span={} name={}", self.span, self.name),
+        );
     }
 }
 
@@ -432,7 +453,11 @@ impl TableField {
                 value.fmt_snapshot(indent + 2, out);
             }
             Self::Named { span, name, value } => {
-                indent_line(indent, out, &format!("NamedField span={} name={}", span, name));
+                indent_line(
+                    indent,
+                    out,
+                    &format!("NamedField span={} name={}", span, name),
+                );
                 value.fmt_snapshot(indent + 2, out);
             }
             Self::Keyed { span, key, value } => {
@@ -476,10 +501,18 @@ impl Var {
     fn fmt_snapshot(&self, indent: usize, out: &mut String) {
         match &self.kind {
             VarKind::Name(name) => {
-                indent_line(indent, out, &format!("VarName span={} name={}", self.span, name));
+                indent_line(
+                    indent,
+                    out,
+                    &format!("VarName span={} name={}", self.span, name),
+                );
             }
             VarKind::Field { prefix, name } => {
-                indent_line(indent, out, &format!("VarField span={} name={}", self.span, name));
+                indent_line(
+                    indent,
+                    out,
+                    &format!("VarField span={} name={}", self.span, name),
+                );
                 prefix.fmt_snapshot(indent + 2, out);
             }
             VarKind::Index { prefix, index } => {
@@ -494,14 +527,8 @@ impl Var {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VarKind {
     Name(String),
-    Field {
-        prefix: Box<Expr>,
-        name: String,
-    },
-    Index {
-        prefix: Box<Expr>,
-        index: Box<Expr>,
-    },
+    Field { prefix: Box<Expr>, name: String },
+    Index { prefix: Box<Expr>, index: Box<Expr> },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
