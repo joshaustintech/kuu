@@ -141,3 +141,8 @@ For any task, load:
 - exactly one phase file matching the current milestone
 - `03-architecture-and-gc.md` only if the task touches runtime design or GC
 - `09-qa-and-definition-of-done.md` when validating completion
+
+## Git And GitHub Workflow
+
+- Use `git` directly for staging, committing, branching, and pushing.
+- Do not use `gh` for git or GitHub operations unless the user explicitly asks for it.
