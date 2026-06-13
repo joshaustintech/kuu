@@ -519,7 +519,7 @@ impl<'a> Lexer<'a> {
             Some('[') => {
                 if let Some((level, opener_len)) = self.long_bracket_level_at_current() {
                     self.consume_char_n(opener_len);
-                    let value = self.scan_long_bracket_content(level)?;
+                    let value = self.scan_long_bracket_content(level, start_line, start_column)?;
                     return Ok(self.finish_token(
                         TokenKind::String(value),
                         start_index,
@@ -588,11 +588,14 @@ impl<'a> Lexer<'a> {
                     self.skip_whitespace_only();
                 }
                 Some('-') if self.peek_char(1) == Some('-') => {
+                    let comment_line = self.line;
+                    let comment_column = self.column;
                     let _ = self.consume_char();
                     let _ = self.consume_char();
                     if let Some((level, opener_len)) = self.long_bracket_level_at_current() {
                         self.consume_char_n(opener_len);
-                        let _ = self.scan_long_bracket_content(level)?;
+                        let _ =
+                            self.scan_long_bracket_content(level, comment_line, comment_column)?;
                     } else {
                         self.skip_short_comment();
                     }
@@ -611,7 +614,12 @@ impl<'a> Lexer<'a> {
         }
     }
 
-    fn scan_long_bracket_content(&mut self, level: usize) -> KResult<Vec<u8>> {
+    fn scan_long_bracket_content(
+        &mut self,
+        level: usize,
+        start_line: usize,
+        start_column: usize,
+    ) -> KResult<Vec<u8>> {
         let mut value = Vec::new();
 
         if matches!(self.peek_char(0), Some('\n' | '\r')) {
@@ -622,8 +630,8 @@ impl<'a> Lexer<'a> {
             let Some(ch) = self.peek_char(0) else {
                 return Err(self.syntax_error(
                     "unterminated long string or comment",
-                    self.line,
-                    self.column,
+                    start_line,
+                    start_column,
                 ));
             };
 
