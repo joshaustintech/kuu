@@ -931,23 +931,29 @@ pub fn native_dofile(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
 }
 
 pub fn native_warn(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    if args.is_empty() {
+        return Err(KError::new(
+            KErrorKind::Runtime("warn expects at least one argument".to_owned()),
+            None,
+        ));
+    }
+
     let mut text = String::new();
-    for (index, value) in args.iter().enumerate() {
-        if index > 0 {
-            text.push('\t');
-        }
+    for value in args {
         text.push_str(&vm.format_value(*value)?);
     }
-    if text == "@off" {
-        vm.warn_enabled = false;
+
+    if args.len() == 1 && text.starts_with('@') {
+        if text == "@off" {
+            vm.warn_enabled = false;
+        } else if text == "@on" {
+            vm.warn_enabled = true;
+        }
         return Ok(Vec::new());
     }
-    if text == "@on" {
-        vm.warn_enabled = true;
-        return Ok(Vec::new());
-    }
+
     if vm.warn_enabled {
-        eprintln!("{text}");
+        eprintln!("Lua warning: {text}");
     }
     Ok(Vec::new())
 }
@@ -2498,6 +2504,45 @@ pub fn native_io_tmpfile(vm: &mut Vm, _args: &[Value]) -> KResult<Vec<Value>> {
     Ok(vec![Value::userdata(handle)])
 }
 
+pub fn native_package_searchpath(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let name = string_text(vm, args)?;
+    let path = match args.get(1).copied().unwrap_or(Value::nil()) {
+        Value::String(handle) => {
+            let bytes = vm.heap.string_bytes(handle).ok_or_else(|| {
+                KError::new(KErrorKind::Runtime("invalid package path".to_owned()), None)
+            })?;
+            String::from_utf8_lossy(bytes).into_owned()
+        }
+        other => {
+            return Err(KError::new(
+                KErrorKind::Runtime(format!(
+                    "package.searchpath expects a string path, got {}",
+                    vm.value_type_name(other)
+                )),
+                None,
+            ));
+        }
+    };
+
+    match vm.search_package_path(&name, &path)? {
+        Some(found) => {
+            let handle = vm.heap.intern_string(found.into_bytes())?;
+            Ok(vec![Value::string(handle)])
+        }
+        None => {
+            let message = vm.heap.intern_string(
+                format!("no file for module '{name}' in package.path").into_bytes(),
+            )?;
+            Ok(vec![Value::nil(), Value::string(message)])
+        }
+    }
+}
+
+pub fn native_require(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let module = string_text(vm, args)?;
+    Ok(vec![vm.require_module_value(&module)?])
+}
+
 stub_native!(
     native_string_gmatch,
     native_string_pack,
@@ -2515,9 +2560,7 @@ stub_native!(
     native_table_unpack,
     native_table_sort,
     native_io_lines,
-    native_package_searchpath,
     native_package_loadlib,
-    native_require,
     native_debug_traceback,
     native_debug_getinfo,
     native_debug_getupvalue,
@@ -2680,7 +2723,7 @@ impl Vm {
         let mut vm = Self {
             heap,
             userdatas: Vec::new(),
-            warn_enabled: true,
+            warn_enabled: false,
             start_instant: std::time::Instant::now(),
             os_locale: "C".to_owned(),
             file_metatable: TableHandle::new(0),
@@ -4605,6 +4648,11 @@ impl Vm {
         env: Option<Value>,
     ) -> KResult<ClosureHandle> {
         let is_binary = bytes.starts_with(b"KUUBIN\0");
+        let bytes = if !is_binary && bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
+            bytes.get(3..).unwrap_or(&[])
+        } else {
+            bytes
+        };
         match mode {
             Some("b") if !is_binary => {
                 return Err(KError::new(
@@ -5680,29 +5728,318 @@ impl Vm {
         Ok(None)
     }
 
-    pub fn set_cli_args(&mut self, binary: &str, script: &str, args: &[String]) -> KResult<()> {
+    pub fn global_string(&self, name: &[u8]) -> KResult<Option<String>> {
+        let Some(value) = self.global_value(name)? else {
+            return Ok(None);
+        };
+        match value {
+            Value::String(handle) => {
+                let bytes = self.heap.string_bytes(handle).ok_or_else(|| {
+                    KError::new(
+                        KErrorKind::Runtime("invalid string handle".to_owned()),
+                        None,
+                    )
+                })?;
+                Ok(Some(String::from_utf8_lossy(bytes).into_owned()))
+            }
+            _ => Ok(None),
+        }
+    }
+
+    pub fn package_path(&mut self) -> KResult<String> {
+        self.package_string_field("path")
+    }
+
+    pub fn package_cpath(&mut self) -> KResult<String> {
+        self.package_string_field("cpath")
+    }
+
+    pub fn set_package_path(&mut self, value: &str) -> KResult<()> {
+        self.set_package_string_field("path", value)
+    }
+
+    pub fn set_package_cpath(&mut self, value: &str) -> KResult<()> {
+        self.set_package_string_field("cpath", value)
+    }
+
+    pub fn set_cli_args_from_raw(
+        &mut self,
+        binary: &str,
+        raw_args: &[String],
+        script_index: Option<usize>,
+        implicit_script_name: Option<&str>,
+    ) -> KResult<()> {
         let table = self.heap.new_table()?;
-        let binary_handle = self.heap.intern_string(binary.as_bytes().to_vec())?;
-        let script_handle = self.heap.intern_string(script.as_bytes().to_vec())?;
-        self.heap
-            .resolve_table_mut(table)?
-            .raw_set(Value::integer(-1), Value::string(binary_handle))?;
-        self.heap
-            .resolve_table_mut(table)?
-            .raw_set(Value::integer(0), Value::string(script_handle))?;
-        for (index, arg) in args.iter().enumerate() {
-            let slot = i64::try_from(index + 1).map_err(|_| {
-                KError::new(
-                    KErrorKind::Runtime("argument index overflow".to_owned()),
-                    None,
-                )
-            })?;
-            let handle = self.heap.intern_string(arg.as_bytes().to_vec())?;
-            self.heap
-                .resolve_table_mut(table)?
-                .raw_set(Value::integer(slot), Value::string(handle))?;
+        match script_index {
+            Some(index) => {
+                let binary_slot = i64::try_from(index)
+                    .map_err(|_| {
+                        KError::new(
+                            KErrorKind::Runtime("argument index overflow".to_owned()),
+                            None,
+                        )
+                    })?
+                    .checked_add(1)
+                    .and_then(|value| value.checked_neg())
+                    .ok_or_else(|| {
+                        KError::new(
+                            KErrorKind::Runtime("argument index overflow".to_owned()),
+                            None,
+                        )
+                    })?;
+                self.set_cli_arg_entry(table, binary_slot, binary)?;
+
+                for arg_index in 0..index {
+                    let remaining = index.checked_sub(arg_index).ok_or_else(|| {
+                        KError::new(
+                            KErrorKind::Runtime("argument index overflow".to_owned()),
+                            None,
+                        )
+                    })?;
+                    let slot = i64::try_from(remaining).map_err(|_| {
+                        KError::new(
+                            KErrorKind::Runtime("argument index overflow".to_owned()),
+                            None,
+                        )
+                    })?;
+                    self.set_cli_arg_entry(
+                        table,
+                        slot.checked_neg().ok_or_else(|| {
+                            KError::new(
+                                KErrorKind::Runtime("argument index overflow".to_owned()),
+                                None,
+                            )
+                        })?,
+                        raw_args.get(arg_index).ok_or_else(|| {
+                            KError::new(
+                                KErrorKind::Runtime("missing command-line argument".to_owned()),
+                                None,
+                            )
+                        })?,
+                    )?;
+                }
+
+                let script_name = if let Some(name) = implicit_script_name {
+                    name.to_owned()
+                } else {
+                    raw_args.get(index).cloned().ok_or_else(|| {
+                        KError::new(KErrorKind::Runtime("missing script name".to_owned()), None)
+                    })?
+                };
+                self.set_cli_arg_entry(table, 0, &script_name)?;
+
+                for (offset, arg) in raw_args.get(index + 1..).unwrap_or(&[]).iter().enumerate() {
+                    let slot = i64::try_from(offset + 1).map_err(|_| {
+                        KError::new(
+                            KErrorKind::Runtime("argument index overflow".to_owned()),
+                            None,
+                        )
+                    })?;
+                    self.set_cli_arg_entry(table, slot, arg)?;
+                }
+            }
+            None => {
+                if let Some(script_name) = implicit_script_name {
+                    self.set_cli_arg_entry(table, -1, binary)?;
+                    self.set_cli_arg_entry(table, 0, script_name)?;
+                } else {
+                    self.set_cli_arg_entry(table, 0, binary)?;
+                    for (offset, arg) in raw_args.iter().enumerate() {
+                        let slot = i64::try_from(offset + 1).map_err(|_| {
+                            KError::new(
+                                KErrorKind::Runtime("argument index overflow".to_owned()),
+                                None,
+                            )
+                        })?;
+                        self.set_cli_arg_entry(table, slot, arg)?;
+                    }
+                }
+            }
         }
         self.set_global_value(b"arg", Value::table(table))
+    }
+
+    pub fn require_module_into(&mut self, module: &str, global_name: &str) -> KResult<()> {
+        let value = self.require_module_value(module)?;
+        self.set_global_value(global_name.as_bytes(), value)
+    }
+
+    pub fn print_values_to_stdout(&mut self, values: &[Value]) -> KResult<()> {
+        self.print_values(values)
+    }
+
+    pub fn set_warnings_enabled(&mut self, enabled: bool) {
+        self.warn_enabled = enabled;
+    }
+
+    fn set_cli_arg_entry(&mut self, table: TableHandle, slot: i64, text: &str) -> KResult<()> {
+        let handle = self.heap.intern_string(text.as_bytes().to_vec())?;
+        self.heap
+            .resolve_table_mut(table)?
+            .raw_set(Value::integer(slot), Value::string(handle))
+    }
+
+    fn package_table(&self) -> KResult<TableHandle> {
+        match self.global_value(b"package")? {
+            Some(Value::Table(handle)) => Ok(handle),
+            Some(other) => Err(KError::new(
+                KErrorKind::Runtime(format!(
+                    "package is not a table, got {}",
+                    self.value_type_name(other)
+                )),
+                None,
+            )),
+            None => Err(KError::new(
+                KErrorKind::Runtime("package library is not loaded".to_owned()),
+                None,
+            )),
+        }
+    }
+
+    fn package_table_field(&mut self, field: &str) -> KResult<Value> {
+        let package = self.package_table()?;
+        let key = self.heap.intern_string(field.as_bytes().to_vec())?;
+        self.heap
+            .resolve_table(package)?
+            .raw_get(Value::string(key))
+    }
+
+    fn package_loaded_table(&mut self) -> KResult<TableHandle> {
+        match self.package_table_field("loaded")? {
+            Value::Table(handle) => Ok(handle),
+            other => Err(KError::new(
+                KErrorKind::Runtime(format!(
+                    "package.loaded is not a table, got {}",
+                    self.value_type_name(other)
+                )),
+                None,
+            )),
+        }
+    }
+
+    fn package_preload_table(&mut self) -> KResult<TableHandle> {
+        match self.package_table_field("preload")? {
+            Value::Table(handle) => Ok(handle),
+            other => Err(KError::new(
+                KErrorKind::Runtime(format!(
+                    "package.preload is not a table, got {}",
+                    self.value_type_name(other)
+                )),
+                None,
+            )),
+        }
+    }
+
+    fn package_path_text(&mut self) -> KResult<String> {
+        self.package_string_field("path")
+    }
+
+    fn package_string_field(&mut self, field: &str) -> KResult<String> {
+        match self.package_table_field(field)? {
+            Value::String(handle) => {
+                let bytes = self.heap.string_bytes(handle).ok_or_else(|| {
+                    KError::new(
+                        KErrorKind::Runtime("invalid string handle".to_owned()),
+                        None,
+                    )
+                })?;
+                Ok(String::from_utf8_lossy(bytes).into_owned())
+            }
+            other => Err(KError::new(
+                KErrorKind::Runtime(format!(
+                    "package.{field} is not a string, got {}",
+                    self.value_type_name(other)
+                )),
+                None,
+            )),
+        }
+    }
+
+    fn set_package_string_field(&mut self, field: &str, value: &str) -> KResult<()> {
+        let package = self.package_table()?;
+        let key = self.heap.intern_string(field.as_bytes().to_vec())?;
+        let value_handle = self.heap.intern_string(value.as_bytes().to_vec())?;
+        self.heap
+            .resolve_table_mut(package)?
+            .raw_set(Value::string(key), Value::string(value_handle))
+    }
+
+    fn require_module_value(&mut self, module: &str) -> KResult<Value> {
+        let loaded = self.package_loaded_table()?;
+        let module_key = self.heap.intern_string(module.as_bytes().to_vec())?;
+        let key_value = Value::string(module_key);
+
+        let cached = self.heap.resolve_table(loaded)?.raw_get(key_value)?;
+        if !matches!(cached, Value::Nil) {
+            return Ok(cached);
+        }
+
+        let preload = self.package_preload_table()?;
+        let preload_loader = self.heap.resolve_table(preload)?.raw_get(key_value)?;
+        if !matches!(preload_loader, Value::Nil) {
+            return self.finish_require_loader(module, loaded, key_value, preload_loader);
+        }
+
+        if let Some(global_value) = self.global_value(module.as_bytes())?
+            && !matches!(global_value, Value::Nil)
+        {
+            self.heap
+                .resolve_table_mut(loaded)?
+                .raw_set(key_value, global_value)?;
+            return Ok(global_value);
+        }
+
+        let package_path = self.package_path_text()?;
+        if let Some(found_path) = self.search_package_path(module, &package_path)? {
+            let bytes = fs::read(&found_path)?;
+            let closure = self.load_chunk_bytes(&bytes, None, None)?;
+            return self.finish_require_loader(module, loaded, key_value, Value::closure(closure));
+        }
+
+        Err(KError::new(
+            KErrorKind::Runtime(format!("module '{module}' not found")),
+            None,
+        ))
+    }
+
+    fn finish_require_loader(
+        &mut self,
+        module: &str,
+        loaded: TableHandle,
+        module_key: Value,
+        loader: Value,
+    ) -> KResult<Value> {
+        let module_handle = self.heap.intern_string(module.as_bytes().to_vec())?;
+        let results = self.call_value_multi(loader, vec![Value::string(module_handle)])?;
+        let first = results.first().copied().unwrap_or(Value::nil());
+        let stored = if !matches!(first, Value::Nil) {
+            first
+        } else {
+            let existing = self.heap.resolve_table(loaded)?.raw_get(module_key)?;
+            if matches!(existing, Value::Nil) {
+                Value::boolean(true)
+            } else {
+                existing
+            }
+        };
+        self.heap
+            .resolve_table_mut(loaded)?
+            .raw_set(module_key, stored)?;
+        Ok(stored)
+    }
+
+    fn search_package_path(&self, module: &str, package_path: &str) -> KResult<Option<String>> {
+        let module_path = module.replace('.', "/");
+        for template in package_path.split(';') {
+            if template.is_empty() {
+                continue;
+            }
+            let candidate = template.replace('?', &module_path);
+            if std::path::Path::new(&candidate).is_file() {
+                return Ok(Some(candidate));
+            }
+        }
+        Ok(None)
     }
 
     #[allow(dead_code)]
