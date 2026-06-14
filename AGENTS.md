@@ -8,6 +8,24 @@ Project targets:
 - Tests: `/Users/josh/lua-5.5.0-tests`
 - Harness entrypoint: `/Users/josh/lua-5.5.0-tests/all.lua`
 
+## Default Orchestration
+
+When the user asks to implement a phase or other major change, do not work the phase one subtask at a time by default. First, assess every subtask in the relevant phase or milestone doc, split out any independent work, and assign each independent subtask to a concurrent small agent. Keep dependent work sequential in the main thread.
+
+Use only small concurrent agents, and keep them on Medium effort:
+
+- GPT-5.4-Mini
+- Claude Haiku
+- Gemini 3.5 Flash
+
+Use this default prompt shape for each spawned agent:
+
+```text
+Implement this subtask with TDD first. After the first pass, add TDD coverage for edge cases. Then do a review pass for repetitive or unnecessary code. Then do a final code review pass and fix any issues found, or use TDD to prove the issue wrong. If implementation work requires documentation updates, write them in docs/ or AGENTS.md. Report back with the tests added, edge cases covered, cleanup performed, and any docs updated.
+```
+
+Once all subtasks are complete, run the final project pass, make any required documentation updates, commit the change set with Codex as co-author, and push directly to `main`.
+
 ## Load Order
 
 Start here, then load only the files that match the task:

@@ -1,5 +1,7 @@
 # Phases 0-3
 
+Orchestration note: when this phase is requested, assess every subtask first, split independent work into concurrent small agents, keep dependent work sequential, and follow the default work loop in `AGENTS.md`.
+
 ## Phase 0: Project Guardrails
 
 Goal:

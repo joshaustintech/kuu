@@ -1,5 +1,7 @@
 # QA And Definition Of Done
 
+Orchestration note: use this doc as the final pass and merge gate for any phase or major change. After the subtasks finish, require the cleanup review, final code review, documentation updates, git commit with Codex as co-author, and push to `main` before calling the work done.
+
 ## Continuous Checks
 
 Run these after every phase:
@@ -39,6 +41,8 @@ A phase is not done because the code "looks complete". It is done only when:
 - the implementation makes those tests pass
 - continuous checks pass
 - no new unsupported behavior was introduced silently
+- the final cleanup pass and documentation pass are complete
+- the change set is committed and pushed only after the final pass succeeds
 
 ## Project Definition Of Done
 

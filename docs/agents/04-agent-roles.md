@@ -4,16 +4,21 @@
 
 Owns:
 
+- assessing every subtask in a phase or major change before implementation starts
+- deciding which subtasks can run concurrently and which must stay sequential
+- spawning only small concurrent agents, on Medium effort, for independent work
 - choosing the smallest relevant docs to load
 - selecting the current phase file
 - breaking work into GPT Mini-sized prompts
 - enforcing test-first sequencing
+- enforcing edge-case TDD, cleanup passes, final review passes, documentation updates, and git push steps
 - checking whether done criteria are actually met
 
 Avoid:
 
 - making architecture changes without loading the architecture doc
 - claiming completion without QA checks
+- leaving independent subtasks unassigned when they could be run in parallel
 
 ## Spec Agent
 
