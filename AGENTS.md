@@ -111,7 +111,7 @@ Do not load when:
 ### [08-phases-11-12.md](/Users/josh/kuu/docs/agents/08-phases-11-12.md)
 
 Purpose:
-Cover standalone CLI behavior, REPL work, full-suite execution, and C-API compatibility triage.
+Cover standalone CLI behavior, REPL work, full-suite execution, C-API compatibility triage, and the editor/tooling surface for `kuulsp`, MCP, `kuufmt`, and `kuulint`.
 
 Load when:
 - You are implementing the CLI, `arg`, `-e`, `-l`, stdin execution, or conformance runner behavior.
