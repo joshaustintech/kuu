@@ -1,4 +1,5 @@
 use crate::error::KResult;
+use crate::vm::Vm;
 use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::{Mutex, OnceLock};
@@ -53,7 +54,7 @@ handle_type!(ClosureHandle);
 handle_type!(ThreadHandle);
 handle_type!(UserdataHandle);
 
-pub type NativeFunction = fn(&[Value]) -> KResult<Vec<Value>>;
+pub type NativeFunction = fn(&mut Vm, &[Value]) -> KResult<Vec<Value>>;
 
 #[derive(Debug, Clone, Copy)]
 pub enum Value {

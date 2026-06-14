@@ -3,12 +3,13 @@ use kuu::value::{
     ClosureHandle, LuaKey, NativeFunction, StringHandle, TableHandle, ThreadHandle, UserdataHandle,
     Value,
 };
+use kuu::vm::Vm;
 
-fn sample_native(_: &[Value]) -> KResult<Vec<Value>> {
+fn sample_native(_: &mut Vm, _: &[Value]) -> KResult<Vec<Value>> {
     Ok(vec![Value::nil()])
 }
 
-fn other_native(_: &[Value]) -> KResult<Vec<Value>> {
+fn other_native(_: &mut Vm, _: &[Value]) -> KResult<Vec<Value>> {
     Ok(Vec::new())
 }
 

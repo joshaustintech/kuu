@@ -67,6 +67,9 @@ struct ClosureObject {
 struct TableObject {
     array: Vec<Value>,
     hash: BTreeMap<LuaKey, Value>,
+    metatable: Option<TableHandle>,
+    marked: bool,
+    finalizer_ran: bool,
 }
 
 impl TableObject {
@@ -74,6 +77,9 @@ impl TableObject {
         Self {
             array: Vec::new(),
             hash: BTreeMap::new(),
+            metatable: None,
+            marked: false,
+            finalizer_ran: false,
         }
     }
 
@@ -160,13 +166,20 @@ impl TableObject {
             let _ = self.array.pop();
         }
     }
+
+    fn iter_values(&self) -> impl Iterator<Item = Value> + '_ {
+        self.array
+            .iter()
+            .copied()
+            .chain(self.hash.values().copied())
+    }
 }
 
 #[derive(Debug, Clone)]
 struct Heap {
     strings: Vec<Vec<u8>>,
     string_lookup: BTreeMap<Vec<u8>, StringHandle>,
-    tables: Vec<TableObject>,
+    tables: Vec<Option<TableObject>>,
     closures: Vec<ClosureObject>,
     upvalues: Vec<Upvalue>,
 }
@@ -212,7 +225,7 @@ impl Heap {
                 None,
             )
         })?;
-        self.tables.push(TableObject::new());
+        self.tables.push(Some(TableObject::new()));
         Ok(TableHandle::new(raw))
     }
 
@@ -220,18 +233,24 @@ impl Heap {
         let index = usize::try_from(handle.raw()).map_err(|_| {
             KError::new(KErrorKind::Runtime("invalid table handle".to_owned()), None)
         })?;
-        self.tables.get(index).ok_or_else(|| {
-            KError::new(KErrorKind::Runtime("invalid table handle".to_owned()), None)
-        })
+        self.tables
+            .get(index)
+            .and_then(Option::as_ref)
+            .ok_or_else(|| {
+                KError::new(KErrorKind::Runtime("invalid table handle".to_owned()), None)
+            })
     }
 
     fn resolve_table_mut(&mut self, handle: TableHandle) -> KResult<&mut TableObject> {
         let index = usize::try_from(handle.raw()).map_err(|_| {
             KError::new(KErrorKind::Runtime("invalid table handle".to_owned()), None)
         })?;
-        self.tables.get_mut(index).ok_or_else(|| {
-            KError::new(KErrorKind::Runtime("invalid table handle".to_owned()), None)
-        })
+        self.tables
+            .get_mut(index)
+            .and_then(Option::as_mut)
+            .ok_or_else(|| {
+                KError::new(KErrorKind::Runtime("invalid table handle".to_owned()), None)
+            })
     }
 
     fn new_upvalue_open(&mut self, stack_index: usize) -> KResult<UpvalueHandle> {
@@ -389,18 +408,53 @@ impl Heap {
     }
 }
 
-pub fn native_print(args: &[Value]) -> KResult<Vec<Value>> {
-    let mut out = io::stdout().lock();
-    for (index, value) in args.iter().enumerate() {
-        if index > 0 {
-            out.write_all(b"\t")?;
-        }
-        let text = value.to_string();
-        out.write_all(text.as_bytes())?;
-    }
-    out.write_all(b"\n")?;
-    out.flush()?;
+pub fn native_print(_vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    _vm.print_values(args)?;
     Ok(Vec::new())
+}
+
+pub fn native_collectgarbage(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    vm.collectgarbage_request(args)
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GcMode {
+    Incremental,
+    Generational,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct GcParams {
+    pause: usize,
+    stepmul: usize,
+    stepsize: usize,
+}
+
+impl Default for GcParams {
+    fn default() -> Self {
+        Self {
+            pause: 100,
+            stepmul: 100,
+            stepsize: 64,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct GcMetrics {
+    last_step_work: usize,
+    total_step_work: usize,
+    completed_cycles: usize,
+    finalized_objects: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum GcPhase {
+    #[default]
+    Pause,
+    Mark,
+    Sweep,
+    Finalize,
 }
 
 #[derive(Debug, Clone)]
@@ -410,6 +464,15 @@ pub struct Vm {
     frames: Vec<Frame>,
     open_upvalues: Vec<UpvalueHandle>,
     globals: TableHandle,
+    gc_mode: GcMode,
+    gc_running: bool,
+    gc_params: GcParams,
+    gc_phase: GcPhase,
+    gc_gray_tables: Vec<TableHandle>,
+    gc_gray_closures: Vec<ClosureHandle>,
+    gc_sweep_cursor: usize,
+    gc_finalize_queue: Vec<TableHandle>,
+    gc_metrics: GcMetrics,
 }
 
 impl Vm {
@@ -418,8 +481,10 @@ impl Vm {
         let globals = heap.new_table()?;
         {
             let print_name = heap.intern_string(b"print".to_vec())?;
+            let gc_name = heap.intern_string(b"collectgarbage".to_vec())?;
             let table = heap.resolve_table_mut(globals)?;
             table.raw_set(Value::string(print_name), Value::native(native_print))?;
+            table.raw_set(Value::string(gc_name), Value::native(native_collectgarbage))?;
         }
         Ok(Self {
             heap,
@@ -427,12 +492,157 @@ impl Vm {
             frames: Vec::new(),
             open_upvalues: Vec::new(),
             globals,
+            gc_mode: GcMode::Incremental,
+            gc_running: true,
+            gc_params: GcParams::default(),
+            gc_phase: GcPhase::Pause,
+            gc_gray_tables: Vec::new(),
+            gc_gray_closures: Vec::new(),
+            gc_sweep_cursor: 0,
+            gc_finalize_queue: Vec::new(),
+            gc_metrics: GcMetrics::default(),
         })
     }
 
     pub fn run_proto(&mut self, proto: &Proto) -> KResult<Vec<Value>> {
         let closure = self.instantiate_root_closure(proto.clone())?;
         self.run_closure(closure)
+    }
+
+    pub fn collectgarbage_request(&mut self, args: &[Value]) -> KResult<Vec<Value>> {
+        let operation = match args.first() {
+            Some(Value::String(handle)) => self.heap.string_bytes(*handle).map_or_else(
+                || {
+                    Err(KError::new(
+                        KErrorKind::Runtime("invalid collectgarbage operation".to_owned()),
+                        None,
+                    ))
+                },
+                |bytes| {
+                    std::str::from_utf8(bytes).map_err(|_| {
+                        KError::new(
+                            KErrorKind::Runtime(
+                                "collectgarbage expects a UTF-8 operation".to_owned(),
+                            ),
+                            None,
+                        )
+                    })
+                },
+            )?,
+            None => "collect",
+            _ => {
+                return Err(KError::new(
+                    KErrorKind::Runtime("collectgarbage expects a string operation".to_owned()),
+                    None,
+                ));
+            }
+        };
+
+        match operation {
+            "collect" | "collectgarbage" => {
+                self.gc_collect_full()?;
+                Ok(vec![Value::number(self.gc_count_kib())])
+            }
+            "count" => Ok(vec![Value::number(self.gc_count_kib())]),
+            "step" => {
+                let budget = match args.get(1) {
+                    Some(Value::Integer(value)) if *value >= 0 => {
+                        usize::try_from(*value).map_err(|_| {
+                            KError::new(
+                                KErrorKind::Runtime("step budget overflow".to_owned()),
+                                None,
+                            )
+                        })?
+                    }
+                    Some(Value::Number(value)) if *value >= 0.0 => {
+                        if value.fract() != 0.0 {
+                            return Err(KError::new(
+                                KErrorKind::Runtime("step budget must be an integer".to_owned()),
+                                None,
+                            ));
+                        }
+                        usize::try_from(*value as u64).map_err(|_| {
+                            KError::new(
+                                KErrorKind::Runtime("step budget overflow".to_owned()),
+                                None,
+                            )
+                        })?
+                    }
+                    Some(_) => {
+                        return Err(KError::new(
+                            KErrorKind::Runtime("step budget must be non-negative".to_owned()),
+                            None,
+                        ));
+                    }
+                    None => self.gc_params.stepsize,
+                };
+                let completed = self.gc_step(budget)?;
+                Ok(vec![Value::boolean(completed)])
+            }
+            "stop" => {
+                let previous = self.gc_running;
+                self.gc_running = false;
+                Ok(vec![Value::boolean(previous)])
+            }
+            "restart" => {
+                let previous = self.gc_running;
+                self.gc_running = true;
+                Ok(vec![Value::boolean(previous)])
+            }
+            "isrunning" => Ok(vec![Value::boolean(self.gc_running)]),
+            "incremental" => {
+                let previous = self.gc_mode;
+                self.gc_mode = GcMode::Incremental;
+                Ok(vec![Value::string(self.gc_mode_name(previous)?)])
+            }
+            "generational" => {
+                let previous = self.gc_mode;
+                self.gc_mode = GcMode::Generational;
+                Ok(vec![Value::string(self.gc_mode_name(previous)?)])
+            }
+            "param" => {
+                let name = if let Some(Value::String(handle)) = args.get(1) {
+                    let bytes = self.heap.string_bytes(*handle).ok_or_else(|| {
+                        KError::new(
+                            KErrorKind::Runtime("invalid GC parameter name".to_owned()),
+                            None,
+                        )
+                    })?;
+                    std::str::from_utf8(bytes)
+                        .map(|value| value.to_owned())
+                        .map_err(|_| {
+                            KError::new(
+                                KErrorKind::Runtime("GC parameter name must be UTF-8".to_owned()),
+                                None,
+                            )
+                        })?
+                } else {
+                    return Err(KError::new(
+                        KErrorKind::Runtime(
+                            "collectgarbage('param') expects a parameter name".to_owned(),
+                        ),
+                        None,
+                    ));
+                };
+                let current = self.gc_param_value(&name)?;
+                if let Some(value) = args.get(2) {
+                    let next = self.gc_param_from_value(&name, *value)?;
+                    self.gc_set_param_value(&name, next)?;
+                }
+                Ok(vec![Value::integer(i64::try_from(current).map_err(
+                    |_| {
+                        KError::new(
+                            KErrorKind::Runtime("GC parameter overflow".to_owned()),
+                            None,
+                        )
+                    },
+                )?)])
+            }
+            other => Err(KError::new(
+                KErrorKind::Runtime(format!("unsupported collectgarbage operation '{other}'")),
+                None,
+            )),
+        }
     }
 
     fn run_closure(&mut self, closure: ClosureHandle) -> KResult<Vec<Value>> {
@@ -1546,12 +1756,7 @@ impl Vm {
     }
 
     fn call_native(&mut self, function: NativeFunction, args: &[Value]) -> KResult<Vec<Value>> {
-        if std::ptr::fn_addr_eq(function, native_print as NativeFunction) {
-            self.print_values(args)?;
-            Ok(Vec::new())
-        } else {
-            function(args)
-        }
+        function(self, args)
     }
 
     fn print_values(&mut self, args: &[Value]) -> KResult<()> {
@@ -1617,6 +1822,338 @@ impl Vm {
     }
 }
 
+impl Vm {
+    fn gc_mode_name(&mut self, mode: GcMode) -> KResult<StringHandle> {
+        let bytes = match mode {
+            GcMode::Incremental => b"incremental".to_vec(),
+            GcMode::Generational => b"generational".to_vec(),
+        };
+        self.heap.intern_string(bytes)
+    }
+
+    fn gc_param_value(&self, name: &str) -> KResult<usize> {
+        match name {
+            "pause" => Ok(self.gc_params.pause),
+            "stepmul" => Ok(self.gc_params.stepmul),
+            "stepsize" => Ok(self.gc_params.stepsize),
+            _ => Err(KError::new(
+                KErrorKind::Runtime(format!("unsupported GC parameter '{name}'")),
+                None,
+            )),
+        }
+    }
+
+    fn gc_param_from_value(&self, _name: &str, value: Value) -> KResult<usize> {
+        match value {
+            Value::Integer(value) if value >= 0 => usize::try_from(value).map_err(|_| {
+                KError::new(
+                    KErrorKind::Runtime("GC parameter overflow".to_owned()),
+                    None,
+                )
+            }),
+            Value::Number(value) if value >= 0.0 && value.fract() == 0.0 => {
+                usize::try_from(value as u64).map_err(|_| {
+                    KError::new(
+                        KErrorKind::Runtime("GC parameter overflow".to_owned()),
+                        None,
+                    )
+                })
+            }
+            _ => Err(KError::new(
+                KErrorKind::Runtime("GC parameter must be a non-negative integer".to_owned()),
+                None,
+            )),
+        }
+    }
+
+    fn gc_set_param_value(&mut self, name: &str, value: usize) -> KResult<()> {
+        match name {
+            "pause" => self.gc_params.pause = value,
+            "stepmul" => self.gc_params.stepmul = value,
+            "stepsize" => self.gc_params.stepsize = value,
+            _ => {
+                return Err(KError::new(
+                    KErrorKind::Runtime(format!("unsupported GC parameter '{name}'")),
+                    None,
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn gc_count_kib(&self) -> f64 {
+        let bytes = self.gc_count_bytes();
+        (bytes as f64) / 1024.0
+    }
+
+    fn gc_count_bytes(&self) -> usize {
+        let mut bytes = 0usize;
+        for string in &self.heap.strings {
+            bytes = bytes.saturating_add(string.len().saturating_add(16));
+        }
+        for table in &self.heap.tables {
+            if let Some(table) = table.as_ref() {
+                bytes = bytes
+                    .saturating_add(64)
+                    .saturating_add(table.array.len().saturating_mul(16))
+                    .saturating_add(table.hash.len().saturating_mul(32));
+            }
+        }
+        for closure in &self.heap.closures {
+            bytes = bytes
+                .saturating_add(64)
+                .saturating_add(closure.upvalues.len().saturating_mul(8));
+        }
+        bytes.saturating_add(self.heap.upvalues.len().saturating_mul(16))
+    }
+
+    fn gc_collect_full(&mut self) -> KResult<()> {
+        let was_running = self.gc_running;
+        self.gc_running = true;
+        self.gc_begin_cycle()?;
+        loop {
+            if self.gc_step(self.gc_params.stepsize.max(1))? {
+                break;
+            }
+        }
+        self.gc_running = was_running;
+        Ok(())
+    }
+
+    fn gc_step(&mut self, budget: usize) -> KResult<bool> {
+        if !self.gc_running {
+            self.gc_metrics.last_step_work = 0;
+            return Ok(false);
+        }
+
+        if matches!(self.gc_phase, GcPhase::Pause) {
+            self.gc_begin_cycle()?;
+        }
+
+        let mut remaining = budget.max(1);
+        let mut work = 0usize;
+        while remaining > 0 {
+            match self.gc_phase {
+                GcPhase::Mark => {
+                    if let Some(handle) = self.gc_gray_tables.pop() {
+                        self.gc_visit_table(handle)?;
+                        remaining = remaining.saturating_sub(1);
+                        work = work.saturating_add(1);
+                        continue;
+                    }
+                    if let Some(handle) = self.gc_gray_closures.pop() {
+                        self.gc_visit_closure(handle)?;
+                        remaining = remaining.saturating_sub(1);
+                        work = work.saturating_add(1);
+                        continue;
+                    }
+                    self.gc_phase = GcPhase::Sweep;
+                    self.gc_sweep_cursor = 0;
+                }
+                GcPhase::Sweep => {
+                    if self.gc_sweep_cursor >= self.heap.tables.len() {
+                        self.gc_phase = GcPhase::Finalize;
+                        continue;
+                    }
+                    let index = self.gc_sweep_cursor;
+                    self.gc_sweep_cursor = self.gc_sweep_cursor.saturating_add(1);
+                    if self.gc_sweep_table(index)? {
+                        work = work.saturating_add(1);
+                    }
+                    remaining = remaining.saturating_sub(1);
+                }
+                GcPhase::Finalize => {
+                    if let Some(handle) = self.gc_finalize_queue.pop() {
+                        self.gc_run_finalizer(handle)?;
+                        work = work.saturating_add(1);
+                        remaining = remaining.saturating_sub(1);
+                        continue;
+                    }
+                    self.gc_phase = GcPhase::Pause;
+                    self.gc_metrics.completed_cycles =
+                        self.gc_metrics.completed_cycles.saturating_add(1);
+                    break;
+                }
+                GcPhase::Pause => {
+                    self.gc_begin_cycle()?;
+                }
+            }
+        }
+
+        self.gc_metrics.last_step_work = work;
+        self.gc_metrics.total_step_work = self.gc_metrics.total_step_work.saturating_add(work);
+        Ok(matches!(self.gc_phase, GcPhase::Pause))
+    }
+
+    fn gc_begin_cycle(&mut self) -> KResult<()> {
+        self.gc_phase = GcPhase::Mark;
+        self.gc_gray_tables.clear();
+        self.gc_gray_closures.clear();
+        self.gc_sweep_cursor = 0;
+        self.gc_finalize_queue.clear();
+        for table in self.heap.tables.iter_mut().flatten() {
+            table.marked = false;
+        }
+        let metatables: Vec<TableHandle> = self
+            .heap
+            .tables
+            .iter()
+            .filter_map(|slot| slot.as_ref().and_then(|table| table.metatable))
+            .collect();
+        let stack_values = self.stack.clone();
+        let frame_closures: Vec<ClosureHandle> =
+            self.frames.iter().map(|frame| frame.closure).collect();
+        let open_handles = self.open_upvalues.clone();
+        self.gc_mark_value(Value::Table(self.globals));
+        for handle in metatables {
+            self.gc_mark_table(handle);
+        }
+        for value in stack_values {
+            self.gc_mark_value(value);
+        }
+        for handle in frame_closures {
+            self.gc_mark_closure(handle);
+        }
+        for handle in open_handles {
+            let value = self.heap.upvalue_value(handle, &self.stack)?;
+            self.gc_mark_value(value);
+        }
+        Ok(())
+    }
+
+    fn gc_mark_value(&mut self, value: Value) {
+        match value {
+            Value::Table(handle) => self.gc_mark_table(handle),
+            Value::Closure(handle) => self.gc_mark_closure(handle),
+            _ => {}
+        }
+    }
+
+    fn gc_mark_table(&mut self, handle: TableHandle) {
+        let index = match usize::try_from(handle.raw()) {
+            Ok(index) => index,
+            Err(_) => return,
+        };
+        let Some(Some(table)) = self.heap.tables.get_mut(index) else {
+            return;
+        };
+        if table.marked {
+            return;
+        }
+        table.marked = true;
+        self.gc_gray_tables.push(handle);
+    }
+
+    fn gc_mark_closure(&mut self, handle: ClosureHandle) {
+        let index = match usize::try_from(handle.raw()) {
+            Ok(index) => index,
+            Err(_) => return,
+        };
+        if self.heap.closures.get(index).is_none() {
+            return;
+        }
+        self.gc_gray_closures.push(handle);
+    }
+
+    fn gc_visit_table(&mut self, handle: TableHandle) -> KResult<()> {
+        let Some(table) = self.heap.resolve_table(handle).ok() else {
+            return Ok(());
+        };
+        let metatable = table.metatable;
+        let values: Vec<Value> = table.iter_values().collect();
+        if let Some(metatable) = metatable {
+            self.gc_mark_table(metatable);
+        }
+        for value in values {
+            self.gc_mark_value(value);
+        }
+        Ok(())
+    }
+
+    fn gc_visit_closure(&mut self, handle: ClosureHandle) -> KResult<()> {
+        let closure = self.heap.resolve_closure(handle)?.clone();
+        for upvalue in closure.upvalues {
+            if let Some(index) = self.heap.upvalue_stack_index(upvalue) {
+                if let Some(value) = self.stack.get(index).copied() {
+                    self.gc_mark_value(value);
+                }
+            } else {
+                let value = self.heap.upvalue_value(upvalue, &self.stack)?;
+                self.gc_mark_value(value);
+            }
+        }
+        Ok(())
+    }
+
+    fn gc_sweep_table(&mut self, index: usize) -> KResult<bool> {
+        let Some(snapshot) = self.heap.tables.get(index).and_then(Option::as_ref) else {
+            return Ok(false);
+        };
+        if snapshot.marked {
+            if let Some(Some(table)) = self.heap.tables.get_mut(index) {
+                table.marked = false;
+            }
+            return Ok(false);
+        }
+
+        let metatable = snapshot.metatable;
+        let finalizer_ran = snapshot.finalizer_ran;
+        let needs_finalizer = if !finalizer_ran {
+            self.table_has_gc_finalizer(metatable)?
+        } else {
+            false
+        };
+
+        if needs_finalizer {
+            if let Some(Some(table)) = self.heap.tables.get_mut(index) {
+                table.finalizer_ran = true;
+            }
+            let handle = TableHandle::new(u64::try_from(index).map_err(|_| {
+                KError::new(
+                    KErrorKind::Runtime("table handle overflow".to_owned()),
+                    None,
+                )
+            })?);
+            self.gc_finalize_queue.push(handle);
+            return Ok(true);
+        }
+
+        if let Some(slot) = self.heap.tables.get_mut(index) {
+            *slot = None;
+            return Ok(true);
+        }
+
+        Ok(false)
+    }
+
+    fn gc_run_finalizer(&mut self, handle: TableHandle) -> KResult<()> {
+        let value = Value::Table(handle);
+        let metatable = self.heap.resolve_table(handle)?.metatable;
+        if let Some(metatable) = metatable {
+            let finalizer = self.table_gc_value(metatable)?;
+            if let Value::NativeFunction(function) = finalizer {
+                let _ = function(self, &[value])?;
+            }
+        }
+        self.gc_metrics.finalized_objects = self.gc_metrics.finalized_objects.saturating_add(1);
+        Ok(())
+    }
+
+    fn table_has_gc_finalizer(&mut self, metatable: Option<TableHandle>) -> KResult<bool> {
+        let Some(metatable) = metatable else {
+            return Ok(false);
+        };
+        let finalizer = self.table_gc_value(metatable)?;
+        Ok(!matches!(finalizer, Value::Nil))
+    }
+
+    fn table_gc_value(&mut self, metatable: TableHandle) -> KResult<Value> {
+        let key = self.heap.intern_string(b"__gc".to_vec())?;
+        let metatable_table = self.heap.resolve_table(metatable)?;
+        metatable_table.raw_get(Value::string(key))
+    }
+}
+
 fn apply_jump(pc: usize, offset: JumpOffset) -> KResult<usize> {
     let next = i64::try_from(pc)
         .map_err(|_| {
@@ -1639,4 +2176,143 @@ fn apply_jump(pc: usize, offset: JumpOffset) -> KResult<usize> {
             None,
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    fn intern_string(vm: &mut Vm, bytes: &[u8]) -> KResult<Value> {
+        let handle = vm.heap.intern_string(bytes.to_vec())?;
+        Ok(Value::string(handle))
+    }
+
+    #[test]
+    fn collectgarbage_mode_and_param_round_trip() -> Result<(), Box<dyn std::error::Error>> {
+        let mut vm = Vm::new()?;
+
+        let pause = intern_string(&mut vm, b"pause")?;
+        let stepmul = intern_string(&mut vm, b"stepmul")?;
+        let stepsize = intern_string(&mut vm, b"stepsize")?;
+        let incremental = intern_string(&mut vm, b"incremental")?;
+        let generational = intern_string(&mut vm, b"generational")?;
+        let param = intern_string(&mut vm, b"param")?;
+
+        let previous_pause = vm.collectgarbage_request(&[param, pause, Value::integer(220)])?;
+        assert_eq!(previous_pause, vec![Value::integer(100)]);
+
+        let current_pause = vm.collectgarbage_request(&[param, pause])?;
+        assert_eq!(current_pause, vec![Value::integer(220)]);
+
+        let previous_stepmul = vm.collectgarbage_request(&[param, stepmul, Value::integer(175)])?;
+        assert_eq!(previous_stepmul, vec![Value::integer(100)]);
+
+        let current_stepmul = vm.collectgarbage_request(&[param, stepmul])?;
+        assert_eq!(current_stepmul, vec![Value::integer(175)]);
+
+        let previous_stepsize =
+            vm.collectgarbage_request(&[param, stepsize, Value::integer(32)])?;
+        assert_eq!(previous_stepsize, vec![Value::integer(64)]);
+
+        let current_stepsize = vm.collectgarbage_request(&[param, stepsize])?;
+        assert_eq!(current_stepsize, vec![Value::integer(32)]);
+
+        let previous_mode = vm.collectgarbage_request(&[generational])?;
+        assert_eq!(previous_mode, vec![incremental]);
+
+        let previous_mode = vm.collectgarbage_request(&[incremental])?;
+        assert_eq!(previous_mode, vec![generational]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn gc_step_stays_within_budget() -> Result<(), Box<dyn std::error::Error>> {
+        let mut vm = Vm::new()?;
+
+        for _ in 0..8 {
+            let handle = vm.heap.new_table()?;
+            let table = vm.heap.resolve_table_mut(handle)?;
+            table.raw_set(Value::integer(1), Value::integer(1))?;
+        }
+
+        let completed = vm.gc_step(2)?;
+        assert!(!completed || matches!(vm.gc_phase, GcPhase::Pause));
+        assert!(vm.gc_metrics.last_step_work <= 2);
+
+        Ok(())
+    }
+
+    #[test]
+    fn unreachable_table_cycles_are_collected_and_finalized()
+    -> Result<(), Box<dyn std::error::Error>> {
+        static FINALIZED: AtomicBool = AtomicBool::new(false);
+
+        fn mark_finalized(_: &mut Vm, _: &[Value]) -> KResult<Vec<Value>> {
+            FINALIZED.store(true, Ordering::SeqCst);
+            Ok(Vec::new())
+        }
+
+        FINALIZED.store(false, Ordering::SeqCst);
+
+        let mut vm = Vm::new()?;
+        let left = vm.heap.new_table()?;
+        let right = vm.heap.new_table()?;
+        let metatable = vm.heap.new_table()?;
+        let gc_key = intern_string(&mut vm, b"__gc")?;
+
+        {
+            let mt = vm.heap.resolve_table_mut(metatable)?;
+            mt.raw_set(gc_key, Value::native(mark_finalized))?;
+        }
+
+        {
+            let table = vm.heap.resolve_table_mut(left)?;
+            table.metatable = Some(metatable);
+            table.raw_set(Value::integer(1), Value::table(right))?;
+        }
+        {
+            let table = vm.heap.resolve_table_mut(right)?;
+            table.raw_set(Value::integer(1), Value::table(left))?;
+        }
+
+        let left_index = usize::try_from(left.raw())?;
+        let right_index = usize::try_from(right.raw())?;
+
+        let _ = vm.collectgarbage_request(&[])?;
+        assert!(FINALIZED.load(Ordering::SeqCst));
+        assert!(
+            vm.heap
+                .tables
+                .get(left_index)
+                .and_then(Option::as_ref)
+                .is_some()
+        );
+        assert!(
+            vm.heap
+                .tables
+                .get(right_index)
+                .and_then(Option::as_ref)
+                .is_none()
+        );
+
+        let _ = vm.collectgarbage_request(&[])?;
+        assert!(
+            vm.heap
+                .tables
+                .get(left_index)
+                .and_then(Option::as_ref)
+                .is_none()
+        );
+        assert!(
+            vm.heap
+                .tables
+                .get(right_index)
+                .and_then(Option::as_ref)
+                .is_none()
+        );
+
+        Ok(())
+    }
 }

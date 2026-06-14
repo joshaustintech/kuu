@@ -12,3 +12,9 @@ The long-term goal is to build a compatible Lua 5.5 runtime and tooling
 surface while keeping the codebase easy to audit and reason about.
 
 Status: active development.
+
+Recent progress:
+
+- handle-based GC foundations are in place with incremental step control and
+  collector metrics for tests
+- `collectgarbage` is wired into the runtime for the supported control surface
