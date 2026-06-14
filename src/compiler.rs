@@ -1,10 +1,11 @@
 use crate::ast::{
-    BinaryOp, Block, CallExpr, Chunk, Expr, FunctionBody, FunctionName, Stmt, TableField, UnaryOp,
-    Var, VarKind,
+    BinaryOp, Block, CallExpr, Chunk, Expr, FunctionBody, FunctionName, Stmt, TableField,
+    UnaryOp as AstUnaryOp, Var, VarKind,
 };
 use crate::error::{KError, KResult, KSpan};
 use crate::instruction::{
     ArithmeticOp, CompareOp, ConstantIndex, Instruction, JumpOffset, PrototypeIndex, Register,
+    UnaryOpKind,
 };
 use crate::proto::{Constant, Proto, UpvalueDescriptor};
 use crate::resolve::{BindingTarget, DeclarationKind, ResolvedFunction, Resolver as ScopeResolver};
@@ -951,28 +952,40 @@ impl<'a> FunctionCompiler<'a> {
         Ok(written)
     }
 
-    fn compile_unary_into(&mut self, dst: Register, op: UnaryOp, expr: &Expr) -> KResult<usize> {
+    fn compile_unary_into(&mut self, dst: Register, op: AstUnaryOp, expr: &Expr) -> KResult<usize> {
         match op {
-            UnaryOp::Minus => {
-                let zero = self.load_integer_temp(0)?;
+            AstUnaryOp::Minus => {
                 let value = self.compile_expr_result(expr)?;
-                self.instructions.push(Instruction::Arithmetic {
-                    op: ArithmeticOp::Sub,
+                self.instructions.push(Instruction::Unary {
+                    op: UnaryOpKind::Minus,
                     dst,
-                    left: zero,
-                    right: value,
+                    src: value,
                 });
                 Ok(1)
             }
-            UnaryOp::Not => {
+            AstUnaryOp::Not => {
                 let value = self.compile_expr_result(expr)?;
                 self.compile_not_into(dst, value)?;
                 Ok(1)
             }
-            UnaryOp::Len | UnaryOp::BitNot => Err(KError::bytecode(format!(
-                "unsupported unary operator {:?}",
-                op
-            ))),
+            AstUnaryOp::Len => {
+                let value = self.compile_expr_result(expr)?;
+                self.instructions.push(Instruction::Unary {
+                    op: UnaryOpKind::Len,
+                    dst,
+                    src: value,
+                });
+                Ok(1)
+            }
+            AstUnaryOp::BitNot => {
+                let value = self.compile_expr_result(expr)?;
+                self.instructions.push(Instruction::Unary {
+                    op: UnaryOpKind::BitNot,
+                    dst,
+                    src: value,
+                });
+                Ok(1)
+            }
         }
     }
 
@@ -1068,10 +1081,25 @@ impl<'a> FunctionCompiler<'a> {
             | BinaryOp::BitXor
             | BinaryOp::BitAnd
             | BinaryOp::ShiftLeft
-            | BinaryOp::ShiftRight => Err(KError::bytecode(format!(
-                "unsupported binary operator {:?}",
-                op
-            ))),
+            | BinaryOp::ShiftRight => {
+                let left_reg = self.compile_expr_result(left)?;
+                let right_reg = self.compile_expr_result(right)?;
+                let arithmetic = match op {
+                    BinaryOp::BitOr => ArithmeticOp::BitOr,
+                    BinaryOp::BitXor => ArithmeticOp::BitXor,
+                    BinaryOp::BitAnd => ArithmeticOp::BitAnd,
+                    BinaryOp::ShiftLeft => ArithmeticOp::ShiftLeft,
+                    BinaryOp::ShiftRight => ArithmeticOp::ShiftRight,
+                    _ => return Err(KError::bytecode("invalid bitwise operator")),
+                };
+                self.instructions.push(Instruction::Arithmetic {
+                    op: arithmetic,
+                    dst,
+                    left: left_reg,
+                    right: right_reg,
+                });
+                Ok(1)
+            }
         }
     }
 

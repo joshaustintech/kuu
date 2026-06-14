@@ -1,6 +1,7 @@
 use kuu::error::KResult;
 use kuu::instruction::{
     ArithmeticOp, CompareOp, ConstantIndex, Instruction, JumpOffset, PrototypeIndex, Register,
+    UnaryOpKind,
 };
 use kuu::proto::{Constant, Proto, UpvalueDescriptor};
 
@@ -53,11 +54,22 @@ fn sample_instructions() -> KResult<Vec<Instruction>> {
             left: Register::new(16),
             right: Register::new(17),
         },
+        Instruction::Arithmetic {
+            op: ArithmeticOp::BitAnd,
+            dst: Register::new(15),
+            left: Register::new(16),
+            right: Register::new(17),
+        },
         Instruction::Compare {
             op: CompareOp::LessEq,
             dst: Register::new(18),
             left: Register::new(19),
             right: Register::new(20),
+        },
+        Instruction::Unary {
+            op: UnaryOpKind::Minus,
+            dst: Register::new(18),
+            src: Register::new(19),
         },
         Instruction::Jump {
             offset: JumpOffset::new(-12)?,

@@ -1,5 +1,5 @@
 use kuu::compiler::Compiler;
-use kuu::instruction::{ArithmeticOp, CompareOp, Instruction, JumpOffset, Register};
+use kuu::instruction::{ArithmeticOp, CompareOp, Instruction, JumpOffset, Register, UnaryOpKind};
 use kuu::parser::Parser;
 use kuu::proto::Proto;
 
@@ -200,6 +200,39 @@ fn method_syntax_and_bytecode_encoding_roundtrip() -> Result<(), String> {
     let encoded = proto.encode().map_err(|error| error.to_string())?;
     let decoded = Proto::decode(&encoded).map_err(|error| error.to_string())?;
     assert_eq!(decoded, proto);
+    Ok(())
+}
+
+#[test]
+fn bitwise_and_unary_operators_compile_into_runtime_instructions() -> Result<(), String> {
+    let proto = compile(
+        "local x = 5 & 3\n\
+         local y = ~x\n\
+         local z = #\"abc\"\n\
+         return x, y, z\n",
+    )?;
+
+    assert!(proto.instructions.iter().any(|instruction| matches!(
+        instruction,
+        Instruction::Arithmetic {
+            op: ArithmeticOp::BitAnd,
+            ..
+        }
+    )));
+    assert!(proto.instructions.iter().any(|instruction| matches!(
+        instruction,
+        Instruction::Unary {
+            op: UnaryOpKind::BitNot,
+            ..
+        }
+    )));
+    assert!(proto.instructions.iter().any(|instruction| matches!(
+        instruction,
+        Instruction::Unary {
+            op: UnaryOpKind::Len,
+            ..
+        }
+    )));
     Ok(())
 }
 

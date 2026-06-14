@@ -1,6 +1,7 @@
 use crate::error::{KError, KErrorKind, KResult};
 use crate::instruction::{
     ArithmeticOp, CompareOp, ConstantIndex, Instruction, JumpOffset, PrototypeIndex, Register,
+    UnaryOpKind,
 };
 use crate::proto::{Constant, Proto};
 use crate::value::{ClosureHandle, LuaKey, NativeFunction, StringHandle, TableHandle, Value};
@@ -464,6 +465,7 @@ pub struct Vm {
     frames: Vec<Frame>,
     open_upvalues: Vec<UpvalueHandle>,
     globals: TableHandle,
+    string_metatable: TableHandle,
     gc_mode: GcMode,
     gc_running: bool,
     gc_params: GcParams,
@@ -479,6 +481,7 @@ impl Vm {
     pub fn new() -> KResult<Self> {
         let mut heap = Heap::new();
         let globals = heap.new_table()?;
+        let string_metatable = heap.new_table()?;
         {
             let print_name = heap.intern_string(b"print".to_vec())?;
             let gc_name = heap.intern_string(b"collectgarbage".to_vec())?;
@@ -492,6 +495,7 @@ impl Vm {
             frames: Vec::new(),
             open_upvalues: Vec::new(),
             globals,
+            string_metatable,
             gc_mode: GcMode::Incremental,
             gc_running: true,
             gc_params: GcParams::default(),
@@ -834,6 +838,12 @@ impl Vm {
                 Instruction::Concat { dst, first, last } => {
                     let value = self.concat_values(frame_index, first, last)?;
                     self.write_register(frame_index, dst, value)?;
+                    self.advance_pc(frame_index)?;
+                }
+                Instruction::Unary { op, dst, src } => {
+                    let value = self.read_register(frame_index, src)?;
+                    let result = self.unary(op, value)?;
+                    self.write_register(frame_index, dst, result)?;
                     self.advance_pc(frame_index)?;
                 }
                 Instruction::ForPrep { base, offset } => {
@@ -1507,71 +1517,273 @@ impl Vm {
         }
     }
 
-    fn table_get(&mut self, table: Value, key: Value) -> KResult<Value> {
-        let Value::Table(handle) = table else {
-            return Err(KError::new(
-                KErrorKind::Runtime("attempt to index a non-table value".to_owned()),
-                None,
-            ));
-        };
-        let table = self.heap.resolve_table(handle)?;
-        table.raw_get(key)
+    fn table_get(&mut self, value: Value, key: Value) -> KResult<Value> {
+        self.index_value(value, key, 0)
     }
 
-    fn table_set(&mut self, table: Value, key: Value, value: Value) -> KResult<()> {
-        let Value::Table(handle) = table else {
+    fn table_set(&mut self, value: Value, key: Value, next: Value) -> KResult<()> {
+        self.newindex_value(value, key, next, 0)
+    }
+
+    fn index_value(&mut self, value: Value, key: Value, depth: usize) -> KResult<Value> {
+        let mut visited = Vec::new();
+        self.index_value_inner(value, key, depth, &mut visited)
+    }
+
+    fn index_value_inner(
+        &mut self,
+        value: Value,
+        key: Value,
+        depth: usize,
+        visited: &mut Vec<TableHandle>,
+    ) -> KResult<Value> {
+        if depth >= self.metamethod_depth_limit() {
             return Err(KError::new(
-                KErrorKind::Runtime("attempt to index a non-table value".to_owned()),
+                KErrorKind::Runtime("metamethod recursion limit reached".to_owned()),
                 None,
             ));
-        };
-        let table = self.heap.resolve_table_mut(handle)?;
-        table.raw_set(key, value)
+        }
+
+        match value {
+            Value::Table(handle) => {
+                let table = self.heap.resolve_table(handle)?;
+                let raw = table.raw_get(key)?;
+                if !matches!(raw, Value::Nil) {
+                    return Ok(raw);
+                }
+                if let Some(metatable) = table.metatable
+                    && let Some(method) = self.table_metamethod(metatable, "__index")?
+                {
+                    return self.resolve_index_metamethod(method, value, key, depth, visited);
+                }
+                Ok(Value::nil())
+            }
+            _ => {
+                if let Some(metatable) = self.metatable_of_value(value)
+                    && let Some(method) = self.table_metamethod(metatable, "__index")?
+                {
+                    return self.resolve_index_metamethod(method, value, key, depth, visited);
+                }
+                Err(KError::new(
+                    KErrorKind::Runtime(format!(
+                        "attempt to index a {} value",
+                        self.value_type_name(value)
+                    )),
+                    None,
+                ))
+            }
+        }
+    }
+
+    fn newindex_value(
+        &mut self,
+        value: Value,
+        key: Value,
+        next: Value,
+        depth: usize,
+    ) -> KResult<()> {
+        let mut visited = Vec::new();
+        self.newindex_value_inner(value, key, next, depth, &mut visited)
+    }
+
+    fn newindex_value_inner(
+        &mut self,
+        value: Value,
+        key: Value,
+        next: Value,
+        depth: usize,
+        visited: &mut Vec<TableHandle>,
+    ) -> KResult<()> {
+        if depth >= self.metamethod_depth_limit() {
+            return Err(KError::new(
+                KErrorKind::Runtime("metamethod recursion limit reached".to_owned()),
+                None,
+            ));
+        }
+
+        match value {
+            Value::Table(handle) => {
+                let table = self.heap.resolve_table(handle)?;
+                let raw = table.raw_get(key)?;
+                if !matches!(raw, Value::Nil) || table.metatable.is_none() {
+                    let table = self.heap.resolve_table_mut(handle)?;
+                    return table.raw_set(key, next);
+                }
+                if let Some(metatable) = table.metatable
+                    && let Some(method) = self.table_metamethod(metatable, "__newindex")?
+                {
+                    return self
+                        .resolve_newindex_metamethod(method, value, key, next, depth, visited);
+                }
+                let table = self.heap.resolve_table_mut(handle)?;
+                table.raw_set(key, next)
+            }
+            _ => {
+                if let Some(metatable) = self.metatable_of_value(value)
+                    && let Some(method) = self.table_metamethod(metatable, "__newindex")?
+                {
+                    return self
+                        .resolve_newindex_metamethod(method, value, key, next, depth, visited);
+                }
+                Err(KError::new(
+                    KErrorKind::Runtime(format!(
+                        "attempt to index a {} value",
+                        self.value_type_name(value)
+                    )),
+                    None,
+                ))
+            }
+        }
+    }
+
+    fn resolve_index_metamethod(
+        &mut self,
+        method: Value,
+        receiver: Value,
+        key: Value,
+        depth: usize,
+        visited: &mut Vec<TableHandle>,
+    ) -> KResult<Value> {
+        match method {
+            Value::Table(handle) => {
+                if visited.contains(&handle) {
+                    return Err(KError::new(
+                        KErrorKind::Runtime("loop in gettable".to_owned()),
+                        None,
+                    ));
+                }
+                visited.push(handle);
+                self.index_value_inner(Value::Table(handle), key, depth + 1, visited)
+            }
+            _ => self.call_value_sync(method, vec![receiver, key], depth + 1),
+        }
+    }
+
+    fn resolve_newindex_metamethod(
+        &mut self,
+        method: Value,
+        receiver: Value,
+        key: Value,
+        next: Value,
+        depth: usize,
+        visited: &mut Vec<TableHandle>,
+    ) -> KResult<()> {
+        match method {
+            Value::Table(handle) => {
+                if visited.contains(&handle) {
+                    return Err(KError::new(
+                        KErrorKind::Runtime("loop in settable".to_owned()),
+                        None,
+                    ));
+                }
+                visited.push(handle);
+                self.newindex_value_inner(Value::Table(handle), key, next, depth + 1, visited)
+            }
+            _ => {
+                let _ = self.call_value_sync(method, vec![receiver, key, next], depth + 1)?;
+                Ok(())
+            }
+        }
     }
 
     fn arithmetic(&mut self, op: ArithmeticOp, left: Value, right: Value) -> KResult<Value> {
         match op {
-            ArithmeticOp::Add => self.numeric_add(left, right),
-            ArithmeticOp::Sub => self.numeric_sub(left, right),
-            ArithmeticOp::Mul => self.numeric_mul(left, right),
-            ArithmeticOp::Div => self.numeric_div(left, right),
-            ArithmeticOp::FloorDiv => self.numeric_floor_div(left, right),
-            ArithmeticOp::Mod => self.numeric_mod(left, right),
-            ArithmeticOp::Pow => self.numeric_pow(left, right),
+            ArithmeticOp::Add => {
+                self.numeric_or_metamethod(left, right, Self::numeric_add, "__add")
+            }
+            ArithmeticOp::Sub => {
+                self.numeric_or_metamethod(left, right, Self::numeric_sub, "__sub")
+            }
+            ArithmeticOp::Mul => {
+                self.numeric_or_metamethod(left, right, Self::numeric_mul, "__mul")
+            }
+            ArithmeticOp::Div => {
+                self.numeric_or_metamethod(left, right, Self::numeric_div, "__div")
+            }
+            ArithmeticOp::FloorDiv => {
+                self.numeric_or_metamethod(left, right, Self::numeric_floor_div, "__idiv")
+            }
+            ArithmeticOp::Mod => {
+                self.numeric_or_metamethod(left, right, Self::numeric_mod, "__mod")
+            }
+            ArithmeticOp::Pow => {
+                self.numeric_or_metamethod(left, right, Self::numeric_pow, "__pow")
+            }
+            ArithmeticOp::BitOr => self.bitwise_binary("bitwise or", left, right, |a, b| a | b),
+            ArithmeticOp::BitXor => self.bitwise_binary("bitwise xor", left, right, |a, b| a ^ b),
+            ArithmeticOp::BitAnd => self.bitwise_binary("bitwise and", left, right, |a, b| a & b),
+            ArithmeticOp::ShiftLeft => {
+                self.bitwise_binary("shift left", left, right, Self::bitwise_shift_left)
+            }
+            ArithmeticOp::ShiftRight => {
+                self.bitwise_binary("shift right", left, right, Self::bitwise_shift_right)
+            }
         }
     }
 
     fn compare(&mut self, op: CompareOp, left: Value, right: Value) -> KResult<bool> {
         match op {
-            CompareOp::Eq => Ok(left == right),
-            CompareOp::NotEq => Ok(left != right),
-            CompareOp::Less => {
-                self.ordering(left, right, |value| value == std::cmp::Ordering::Less)
-            }
-            CompareOp::LessEq => self.ordering(left, right, |value| {
-                value == std::cmp::Ordering::Less || value == std::cmp::Ordering::Equal
-            }),
-            CompareOp::Greater => {
-                self.ordering(left, right, |value| value == std::cmp::Ordering::Greater)
-            }
-            CompareOp::GreaterEq => self.ordering(left, right, |value| {
-                value == std::cmp::Ordering::Greater || value == std::cmp::Ordering::Equal
-            }),
+            CompareOp::Eq => self.equal_values(left, right, 0),
+            CompareOp::NotEq => self.equal_values(left, right, 0).map(|value| !value),
+            CompareOp::Less => self.ordering_with_metamethod(left, right, "__lt", false, 0),
+            CompareOp::LessEq => self.ordering_with_metamethod(left, right, "__le", true, 0),
+            CompareOp::Greater => self.ordering_with_metamethod(right, left, "__lt", false, 0),
+            CompareOp::GreaterEq => self.ordering_with_metamethod(right, left, "__le", true, 0),
         }
     }
 
-    fn ordering<F>(&self, left: Value, right: Value, predicate: F) -> KResult<bool>
-    where
-        F: Fn(std::cmp::Ordering) -> bool,
-    {
+    fn ordering_with_metamethod(
+        &mut self,
+        left: Value,
+        right: Value,
+        metamethod: &str,
+        allow_equal: bool,
+        depth: usize,
+    ) -> KResult<bool> {
         if let Some(ordering) = self.compare_values(left, right)? {
-            Ok(predicate(ordering))
-        } else {
-            Err(KError::new(
-                KErrorKind::Runtime("incomparable values".to_owned()),
-                None,
-            ))
+            return Ok(match ordering {
+                std::cmp::Ordering::Less => true,
+                std::cmp::Ordering::Equal => allow_equal,
+                std::cmp::Ordering::Greater => false,
+            });
         }
+
+        match metamethod {
+            "__lt" => {
+                let result = self.call_metamethod(left, right, metamethod, depth)?;
+                Ok(self.is_truthy(result))
+            }
+            "__le" => {
+                if let Some(result) = self.call_binary_metamethod(left, right, metamethod, depth)? {
+                    return Ok(self.is_truthy(result));
+                }
+                let result = self.call_metamethod(left, right, "__lt", depth)?;
+                Ok(!self.is_truthy(result))
+            }
+            _ => Err(KError::new(
+                KErrorKind::Runtime("unsupported comparison operation".to_owned()),
+                None,
+            )),
+        }
+    }
+
+    fn equal_values(&mut self, left: Value, right: Value, depth: usize) -> KResult<bool> {
+        if left == right {
+            return Ok(true);
+        }
+
+        let left_meta = self.metatable_of_value(left);
+        let right_meta = self.metatable_of_value(right);
+        if left_meta.is_some()
+            && left_meta == right_meta
+            && let Some(metatable) = left_meta
+            && let Some(function) = self.table_metamethod(metatable, "__eq")?
+        {
+            let result = self.call_value_sync(function, vec![left, right], depth + 1)?;
+            return Ok(self.is_truthy(result));
+        }
+
+        Ok(false)
     }
 
     fn compare_values(&self, left: Value, right: Value) -> KResult<Option<std::cmp::Ordering>> {
@@ -1674,6 +1886,35 @@ impl Vm {
         Ok(Value::number(left.powf(right)))
     }
 
+    fn numeric_or_metamethod(
+        &mut self,
+        left: Value,
+        right: Value,
+        numeric: fn(&Self, Value, Value) -> KResult<Value>,
+        metamethod: &str,
+    ) -> KResult<Value> {
+        if self.value_to_number_opt(left)?.is_some() && self.value_to_number_opt(right)?.is_some() {
+            return numeric(self, left, right);
+        }
+
+        if let Some(result) = self.call_binary_metamethod(left, right, metamethod, 0)? {
+            return Ok(result);
+        }
+
+        Err(KError::new(
+            KErrorKind::Runtime(format!(
+                "attempt to perform {} on a {} value",
+                self.binary_operation_name(metamethod),
+                self.value_type_name(if self.value_to_number_opt(left)?.is_some() {
+                    right
+                } else {
+                    left
+                })
+            )),
+            None,
+        ))
+    }
+
     fn integer_op(
         &self,
         left: Value,
@@ -1701,10 +1942,169 @@ impl Vm {
         match value {
             Value::Integer(value) => Ok(value as f64),
             Value::Number(value) => Ok(value),
+            Value::String(handle) => {
+                let bytes = self.heap.string_bytes(handle).ok_or_else(|| {
+                    KError::new(
+                        KErrorKind::Runtime("invalid string handle".to_owned()),
+                        None,
+                    )
+                })?;
+                let text = std::str::from_utf8(bytes).map_err(|_| {
+                    KError::new(
+                        KErrorKind::Runtime("numeric value expected".to_owned()),
+                        None,
+                    )
+                })?;
+                text.parse::<f64>().map_err(|_| {
+                    KError::new(
+                        KErrorKind::Runtime("numeric value expected".to_owned()),
+                        None,
+                    )
+                })
+            }
             _ => Err(KError::new(
                 KErrorKind::Runtime("numeric value expected".to_owned()),
                 None,
             )),
+        }
+    }
+
+    fn value_to_number_opt(&self, value: Value) -> KResult<Option<f64>> {
+        match self.value_to_number(value) {
+            Ok(value) => Ok(Some(value)),
+            Err(error) => match error.kind() {
+                KErrorKind::Runtime(message) if message == "numeric value expected" => Ok(None),
+                _ => Err(error),
+            },
+        }
+    }
+
+    fn binary_operation_name(&self, metamethod: &str) -> &'static str {
+        match metamethod {
+            "__add" => "add",
+            "__sub" => "subtract",
+            "__mul" => "multiply",
+            "__div" => "divide",
+            "__idiv" => "perform floor division on",
+            "__mod" => "perform modulo on",
+            "__pow" => "raise",
+            _ => "perform arithmetic on",
+        }
+    }
+
+    fn bitwise_binary<F>(
+        &mut self,
+        op_name: &str,
+        left: Value,
+        right: Value,
+        op: F,
+    ) -> KResult<Value>
+    where
+        F: Fn(i64, i64) -> i64,
+    {
+        if let (Some(left), Some(right)) =
+            (self.value_to_integer(left)?, self.value_to_integer(right)?)
+        {
+            return Ok(Value::integer(op(left, right)));
+        }
+
+        if let Some(result) =
+            self.call_binary_metamethod(left, right, self.bitwise_metamethod_name(op_name), 0)?
+        {
+            return Ok(result);
+        }
+
+        Err(KError::new(
+            KErrorKind::Runtime(format!(
+                "attempt to perform {op_name} on a {} value",
+                self.value_type_name(left)
+            )),
+            None,
+        ))
+    }
+
+    fn unary(&mut self, op: UnaryOpKind, value: Value) -> KResult<Value> {
+        match op {
+            UnaryOpKind::Minus => {
+                if let Some(number) = self.value_to_number_opt(value)? {
+                    return Ok(Value::number(-number));
+                }
+                if let Some(result) = self.call_unary_metamethod(value, "__unm", 0)? {
+                    return Ok(result);
+                }
+                Err(KError::new(
+                    KErrorKind::Runtime(format!(
+                        "attempt to perform unary minus on a {} value",
+                        self.value_type_name(value)
+                    )),
+                    None,
+                ))
+            }
+            UnaryOpKind::BitNot => {
+                if let Some(integer) = self.value_to_integer(value)? {
+                    return Ok(Value::integer(!integer));
+                }
+                if let Some(result) = self.call_unary_metamethod(value, "__bnot", 0)? {
+                    return Ok(result);
+                }
+                Err(KError::new(
+                    KErrorKind::Runtime(format!(
+                        "attempt to perform bitwise not on a {} value",
+                        self.value_type_name(value)
+                    )),
+                    None,
+                ))
+            }
+            UnaryOpKind::Len => self.length(value, 0),
+        }
+    }
+
+    fn length(&mut self, value: Value, depth: usize) -> KResult<Value> {
+        match value {
+            Value::String(handle) => {
+                let bytes = self.heap.string_bytes(handle).ok_or_else(|| {
+                    KError::new(
+                        KErrorKind::Runtime("invalid string handle".to_owned()),
+                        None,
+                    )
+                })?;
+                Ok(Value::integer(i64::try_from(bytes.len()).map_err(
+                    |_| {
+                        KError::new(
+                            KErrorKind::Runtime("string length overflow".to_owned()),
+                            None,
+                        )
+                    },
+                )?))
+            }
+            Value::Table(handle) => {
+                let table = self.heap.resolve_table(handle)?;
+                let metatable = table.metatable;
+                let len = table.array.len();
+                if let Some(metatable) = metatable
+                    && let Some(result) = self.table_metamethod(metatable, "__len")?
+                {
+                    return self.call_value_sync(result, vec![value], depth + 1);
+                }
+                Ok(Value::integer(i64::try_from(len).map_err(|_| {
+                    KError::new(
+                        KErrorKind::Runtime("table length overflow".to_owned()),
+                        None,
+                    )
+                })?))
+            }
+            _ => {
+                if let Some(result) = self.call_unary_metamethod(value, "__len", depth)? {
+                    return Ok(result);
+                }
+                Err(KError::new(
+                    KErrorKind::Runtime(format!(
+                        "attempt to get length of a {} value",
+                        self.value_type_name(value)
+                    )),
+                    None,
+                ))
+            }
         }
     }
 
@@ -1722,14 +2122,503 @@ impl Vm {
                 None,
             ));
         }
-        let mut bytes = Vec::new();
-        for index in start..=end {
-            let value = self.stack.get(index).copied().unwrap_or(Value::nil());
-            let text = self.format_value(value)?;
-            bytes.extend_from_slice(text.as_bytes());
+        let mut current = self.stack.get(start).copied().unwrap_or(Value::nil());
+        for index in start + 1..=end {
+            let next = self.stack.get(index).copied().unwrap_or(Value::nil());
+            current = self.concat_pair(current, next, 0)?;
         }
-        let handle = self.heap.intern_string(bytes)?;
-        Ok(Value::string(handle))
+        Ok(current)
+    }
+
+    #[cfg(test)]
+    fn concat_values_for_test(&mut self, values: &[Value]) -> KResult<Value> {
+        let Some((first, rest)) = values.split_first() else {
+            return Ok(Value::nil());
+        };
+        let mut current = *first;
+        for next in rest {
+            current = self.concat_pair(current, *next, 0)?;
+        }
+        Ok(current)
+    }
+
+    fn concat_pair(&mut self, left: Value, right: Value, depth: usize) -> KResult<Value> {
+        if let (Some(left), Some(right)) = (self.concat_piece(left)?, self.concat_piece(right)?) {
+            let mut bytes = left;
+            bytes.extend_from_slice(&right);
+            let handle = self.heap.intern_string(bytes)?;
+            return Ok(Value::string(handle));
+        }
+
+        if let Some(result) = self.call_binary_metamethod(left, right, "__concat", depth)? {
+            return Ok(result);
+        }
+
+        Err(KError::new(
+            KErrorKind::Runtime(format!(
+                "attempt to concatenate a {} value",
+                self.value_type_name(left)
+            )),
+            None,
+        ))
+    }
+
+    fn concat_piece(&self, value: Value) -> KResult<Option<Vec<u8>>> {
+        match value {
+            Value::String(handle) => {
+                let bytes = self.heap.string_bytes(handle).ok_or_else(|| {
+                    KError::new(
+                        KErrorKind::Runtime("invalid string handle".to_owned()),
+                        None,
+                    )
+                })?;
+                Ok(Some(bytes.to_vec()))
+            }
+            Value::Integer(value) => Ok(Some(value.to_string().into_bytes())),
+            Value::Number(value) => Ok(Some(value.to_string().into_bytes())),
+            _ => Ok(None),
+        }
+    }
+
+    fn value_to_integer(&self, value: Value) -> KResult<Option<i64>> {
+        match value {
+            Value::Integer(value) => Ok(Some(value)),
+            Value::Number(value) if value.is_finite() && value.fract() == 0.0 => {
+                Ok(Some(value as i64))
+            }
+            Value::String(handle) => {
+                let bytes = self.heap.string_bytes(handle).ok_or_else(|| {
+                    KError::new(
+                        KErrorKind::Runtime("invalid string handle".to_owned()),
+                        None,
+                    )
+                })?;
+                let Some(text) = std::str::from_utf8(bytes).ok() else {
+                    return Ok(None);
+                };
+                match text.parse::<i64>() {
+                    Ok(value) => Ok(Some(value)),
+                    Err(_) => Ok(None),
+                }
+            }
+            _ => Ok(None),
+        }
+    }
+
+    fn bitwise_shift_left(left: i64, right: i64) -> i64 {
+        Self::shift_bits(left, right, true)
+    }
+
+    fn bitwise_shift_right(left: i64, right: i64) -> i64 {
+        Self::shift_bits(left, right, false)
+    }
+
+    fn shift_bits(value: i64, count: i64, left: bool) -> i64 {
+        if count < 0 {
+            return Self::shift_bits(value, count.checked_neg().unwrap_or(i64::MAX), !left);
+        }
+        if count >= i64::from(u64::BITS) {
+            return 0;
+        }
+
+        let count = count as u32;
+        let bits = value as u64;
+        let shifted = if left { bits << count } else { bits >> count };
+        shifted as i64
+    }
+
+    fn call_unary_metamethod(
+        &mut self,
+        value: Value,
+        name: &str,
+        depth: usize,
+    ) -> KResult<Option<Value>> {
+        if depth >= self.metamethod_depth_limit() {
+            return Err(KError::new(
+                KErrorKind::Runtime("metamethod recursion limit reached".to_owned()),
+                None,
+            ));
+        }
+        let Some(metatable) = self.metatable_of_value(value) else {
+            return Ok(None);
+        };
+        let Some(function) = self.table_metamethod(metatable, name)? else {
+            return Ok(None);
+        };
+        self.call_value_sync(function, vec![value], depth + 1)
+            .map(Some)
+    }
+
+    fn call_binary_metamethod(
+        &mut self,
+        left: Value,
+        right: Value,
+        name: &str,
+        depth: usize,
+    ) -> KResult<Option<Value>> {
+        if depth >= self.metamethod_depth_limit() {
+            return Err(KError::new(
+                KErrorKind::Runtime("metamethod recursion limit reached".to_owned()),
+                None,
+            ));
+        }
+        let left_meta = self.metatable_of_value(left);
+        let right_meta = self.metatable_of_value(right);
+        if left_meta.is_none() && right_meta.is_none() {
+            return Ok(None);
+        }
+        if let Some(metatable) = left_meta
+            && let Some(function) = self.table_metamethod(metatable, name)?
+        {
+            return self
+                .call_value_sync(function, vec![left, right], depth + 1)
+                .map(Some);
+        }
+        if right_meta == left_meta {
+            return Ok(None);
+        }
+        if let Some(metatable) = right_meta
+            && let Some(function) = self.table_metamethod(metatable, name)?
+        {
+            return self
+                .call_value_sync(function, vec![left, right], depth + 1)
+                .map(Some);
+        }
+        Ok(None)
+    }
+
+    fn call_metamethod(
+        &mut self,
+        left: Value,
+        right: Value,
+        name: &str,
+        depth: usize,
+    ) -> KResult<Value> {
+        self.call_binary_metamethod(left, right, name, depth)?
+            .ok_or_else(|| {
+                KError::new(
+                    KErrorKind::Runtime(format!(
+                        "attempt to compare {} and {} values",
+                        self.value_type_name(left),
+                        self.value_type_name(right)
+                    )),
+                    None,
+                )
+            })
+    }
+
+    fn table_metamethod(&mut self, metatable: TableHandle, name: &str) -> KResult<Option<Value>> {
+        let key = self.heap.intern_string(name.as_bytes().to_vec())?;
+        let table = self.heap.resolve_table(metatable)?;
+        let value = table.raw_get(Value::string(key))?;
+        if matches!(value, Value::Nil) {
+            Ok(None)
+        } else {
+            Ok(Some(value))
+        }
+    }
+
+    fn metatable_of_value(&self, value: Value) -> Option<TableHandle> {
+        match value {
+            Value::Table(handle) => self.heap.resolve_table(handle).ok()?.metatable,
+            Value::String(_) => Some(self.string_metatable),
+            _ => None,
+        }
+    }
+
+    fn value_type_name(&self, value: Value) -> &'static str {
+        match value {
+            Value::Nil => "nil",
+            Value::Boolean(_) => "boolean",
+            Value::Integer(_) | Value::Number(_) => "number",
+            Value::String(_) => "string",
+            Value::Table(_) => "table",
+            Value::Closure(_) | Value::NativeFunction(_) => "function",
+            Value::Thread(_) => "thread",
+            Value::Userdata(_) => "userdata",
+            Value::LightUserdata(_) => "light userdata",
+        }
+    }
+
+    fn bitwise_metamethod_name(&self, op_name: &str) -> &'static str {
+        match op_name {
+            "bitwise or" => "__bor",
+            "bitwise xor" => "__bxor",
+            "bitwise and" => "__band",
+            "shift left" => "__shl",
+            "shift right" => "__shr",
+            _ => "__band",
+        }
+    }
+
+    fn metamethod_depth_limit(&self) -> usize {
+        32
+    }
+
+    fn call_value_sync(
+        &mut self,
+        callee: Value,
+        args: Vec<Value>,
+        _depth: usize,
+    ) -> KResult<Value> {
+        match callee {
+            Value::NativeFunction(function) => {
+                let returned = self.call_native(function, &args)?;
+                Ok(returned.into_iter().next().unwrap_or(Value::nil()))
+            }
+            Value::Closure(handle) => {
+                let saved_stack = std::mem::take(&mut self.stack);
+                let saved_frames = std::mem::take(&mut self.frames);
+                let saved_open_upvalues = std::mem::take(&mut self.open_upvalues);
+                let saved_last_results = saved_frames
+                    .last()
+                    .map(|frame| frame.last_call_results)
+                    .unwrap_or(0);
+                let result = self.run_closure_with_args(handle, args);
+                self.stack = saved_stack;
+                self.frames = saved_frames;
+                self.open_upvalues = saved_open_upvalues;
+                if let Some(frame) = self.frames.last_mut() {
+                    frame.last_call_results = saved_last_results;
+                }
+                result.map(|values| values.into_iter().next().unwrap_or(Value::nil()))
+            }
+            _ => Err(KError::new(
+                KErrorKind::Runtime("attempt to call a non-callable value".to_owned()),
+                None,
+            )),
+        }
+    }
+
+    fn run_closure_with_args(
+        &mut self,
+        closure: ClosureHandle,
+        args: Vec<Value>,
+    ) -> KResult<Vec<Value>> {
+        self.stack.clear();
+        self.frames.clear();
+        self.open_upvalues.clear();
+
+        let stack_size = self.heap.resolve_closure(closure)?.proto.stack_size.max(1);
+        self.ensure_stack_len(usize::from(stack_size))?;
+        self.frames.push(Frame {
+            closure,
+            base: 0,
+            top: usize::from(stack_size),
+            pc: 0,
+            return_target: None,
+            varargs: Vec::new(),
+            last_call_results: 0,
+        });
+
+        self.push_arguments_into_root_frame(args)?;
+        let mut finished = Vec::new();
+        while !self.frames.is_empty() {
+            let frame_index = self.frames.len() - 1;
+            let instruction = self.current_instruction(frame_index)?;
+            self.execute_instruction(frame_index, instruction, &mut finished)?;
+        }
+        Ok(finished)
+    }
+
+    fn push_arguments_into_root_frame(&mut self, args: Vec<Value>) -> KResult<()> {
+        for (index, value) in args.iter().enumerate() {
+            if let Some(slot) = self.stack.get_mut(index) {
+                *slot = *value;
+            }
+        }
+        Ok(())
+    }
+
+    fn execute_instruction(
+        &mut self,
+        frame_index: usize,
+        instruction: Instruction,
+        finished: &mut Vec<Value>,
+    ) -> KResult<()> {
+        match instruction {
+            Instruction::LoadNil { dst } => {
+                self.write_register(frame_index, dst, Value::nil())?;
+                self.advance_pc(frame_index)?;
+            }
+            Instruction::LoadBool { dst, value } => {
+                self.write_register(frame_index, dst, Value::boolean(value))?;
+                self.advance_pc(frame_index)?;
+            }
+            Instruction::LoadInteger { dst, value } => {
+                self.write_register(frame_index, dst, Value::integer(value))?;
+                self.advance_pc(frame_index)?;
+            }
+            Instruction::LoadNumber { dst, value } => {
+                self.write_register(frame_index, dst, Value::number(value))?;
+                self.advance_pc(frame_index)?;
+            }
+            Instruction::LoadConstant { dst, constant } => {
+                let value = self.constant_to_value(frame_index, constant)?;
+                self.write_register(frame_index, dst, value)?;
+                self.advance_pc(frame_index)?;
+            }
+            Instruction::Move { dst, src } => {
+                let value = self.read_register(frame_index, src)?;
+                self.write_register(frame_index, dst, value)?;
+                self.advance_pc(frame_index)?;
+            }
+            Instruction::GetGlobal { dst, name } => {
+                let value = self.get_global(frame_index, name)?;
+                self.write_register(frame_index, dst, value)?;
+                self.advance_pc(frame_index)?;
+            }
+            Instruction::SetGlobal { src, name } => {
+                let value = self.read_register(frame_index, src)?;
+                self.set_global(frame_index, name, value)?;
+                self.advance_pc(frame_index)?;
+            }
+            Instruction::GetTable { dst, table, key } => {
+                let table_value = self.read_register(frame_index, table)?;
+                let key_value = self.read_register(frame_index, key)?;
+                let value = self.table_get(table_value, key_value)?;
+                self.write_register(frame_index, dst, value)?;
+                self.advance_pc(frame_index)?;
+            }
+            Instruction::SetTable { table, key, value } => {
+                let table_value = self.read_register(frame_index, table)?;
+                let key_value = self.read_register(frame_index, key)?;
+                let value_value = self.read_register(frame_index, value)?;
+                self.table_set(table_value, key_value, value_value)?;
+                self.advance_pc(frame_index)?;
+            }
+            Instruction::Arithmetic {
+                op,
+                dst,
+                left,
+                right,
+            } => {
+                let left_value = self.read_register(frame_index, left)?;
+                let right_value = self.read_register(frame_index, right)?;
+                let result = self.arithmetic(op, left_value, right_value)?;
+                self.write_register(frame_index, dst, result)?;
+                self.advance_pc(frame_index)?;
+            }
+            Instruction::Compare {
+                op,
+                dst,
+                left,
+                right,
+            } => {
+                let left_value = self.read_register(frame_index, left)?;
+                let right_value = self.read_register(frame_index, right)?;
+                let result = self.compare(op, left_value, right_value)?;
+                self.write_register(frame_index, dst, Value::boolean(result))?;
+                self.advance_pc(frame_index)?;
+            }
+            Instruction::Jump { offset } => {
+                self.jump(frame_index, offset)?;
+            }
+            Instruction::JumpIfTrue { cond, offset } => {
+                let value = self.read_register(frame_index, cond)?;
+                if self.is_truthy(value) {
+                    self.jump(frame_index, offset)?;
+                } else {
+                    self.advance_pc(frame_index)?;
+                }
+            }
+            Instruction::JumpIfFalse { cond, offset } => {
+                let value = self.read_register(frame_index, cond)?;
+                if !self.is_truthy(value) {
+                    self.jump(frame_index, offset)?;
+                } else {
+                    self.advance_pc(frame_index)?;
+                }
+            }
+            Instruction::NewTable { dst } => {
+                let handle = self.heap.new_table()?;
+                self.write_register(frame_index, dst, Value::table(handle))?;
+                self.advance_pc(frame_index)?;
+            }
+            Instruction::Closure { dst, proto } => {
+                let closure = self.instantiate_child_closure(frame_index, proto)?;
+                self.write_register(frame_index, dst, Value::closure(closure))?;
+                self.advance_pc(frame_index)?;
+            }
+            Instruction::GetUpvalue { dst, upvalue } => {
+                let value = self.get_upvalue(frame_index, upvalue)?;
+                self.write_register(frame_index, dst, value)?;
+                self.advance_pc(frame_index)?;
+            }
+            Instruction::SetUpvalue { src, upvalue } => {
+                let value = self.read_register(frame_index, src)?;
+                self.set_upvalue(frame_index, upvalue, value)?;
+                self.advance_pc(frame_index)?;
+            }
+            Instruction::Vararg { dst, count } => {
+                self.write_varargs(frame_index, dst, count)?;
+                self.advance_pc(frame_index)?;
+            }
+            Instruction::Call {
+                function,
+                args,
+                results,
+            } => {
+                let call_slot = self.absolute_register(frame_index, function)?;
+                let callee = self.read_register(frame_index, function)?;
+                let args = self.read_call_args(frame_index, function, args)?;
+                self.advance_pc(frame_index)?;
+                self.invoke_call(
+                    CallSite {
+                        frame_index,
+                        call_slot,
+                        results: usize::from(results),
+                        tail: false,
+                    },
+                    callee,
+                    args,
+                    finished,
+                )?;
+            }
+            Instruction::TailCall { function, args } => {
+                let call_slot = self.absolute_register(frame_index, function)?;
+                let callee = self.read_register(frame_index, function)?;
+                let args = self.read_call_args(frame_index, function, args)?;
+                self.invoke_call(
+                    CallSite {
+                        frame_index,
+                        call_slot,
+                        results: 0,
+                        tail: true,
+                    },
+                    callee,
+                    args,
+                    finished,
+                )?;
+            }
+            Instruction::Return { first, count } => {
+                let values = self.collect_return_values(frame_index, first, count)?;
+                self.finish_frame(frame_index, values, finished)?;
+            }
+            Instruction::Close { from } => {
+                let stack_index = self.absolute_register(frame_index, from)?;
+                self.close_upvalues_from(stack_index)?;
+                self.advance_pc(frame_index)?;
+            }
+            Instruction::Concat { dst, first, last } => {
+                let value = self.concat_values(frame_index, first, last)?;
+                self.write_register(frame_index, dst, value)?;
+                self.advance_pc(frame_index)?;
+            }
+            Instruction::Unary { op, dst, src } => {
+                let value = self.read_register(frame_index, src)?;
+                let result = self.unary(op, value)?;
+                self.write_register(frame_index, dst, result)?;
+                self.advance_pc(frame_index)?;
+            }
+            Instruction::ForPrep { base, offset } => {
+                self.for_prep(frame_index, base, offset)?;
+            }
+            Instruction::ForLoop { base, offset } => {
+                self.for_loop(frame_index, base, offset)?;
+            }
+        }
+        Ok(())
     }
 
     fn format_value(&self, value: Value) -> KResult<String> {
@@ -2186,6 +3075,309 @@ mod tests {
     fn intern_string(vm: &mut Vm, bytes: &[u8]) -> KResult<Value> {
         let handle = vm.heap.intern_string(bytes.to_vec())?;
         Ok(Value::string(handle))
+    }
+
+    fn set_metafield(
+        vm: &mut Vm,
+        metatable: TableHandle,
+        name: &[u8],
+        value: Value,
+    ) -> KResult<()> {
+        let key = vm.heap.intern_string(name.to_vec())?;
+        let table = vm.heap.resolve_table_mut(metatable)?;
+        table.raw_set(Value::string(key), value)
+    }
+
+    fn test_arg(args: &[Value], index: usize) -> KResult<Value> {
+        args.get(index).copied().ok_or_else(|| {
+            KError::new(
+                KErrorKind::Runtime(format!("missing metamethod argument {index}")),
+                None,
+            )
+        })
+    }
+
+    #[test]
+    fn arithmetic_uses_add_metamethod() -> Result<(), Box<dyn std::error::Error>> {
+        fn add(_: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+            assert_eq!(args.len(), 2);
+            let left = test_arg(args, 0)?;
+            let right = test_arg(args, 1)?;
+            assert!(matches!(left, Value::Table(_)));
+            assert_eq!(right, Value::integer(5));
+            Ok(vec![Value::integer(42)])
+        }
+
+        let mut vm = Vm::new()?;
+        let table = vm.heap.new_table()?;
+        let metatable = vm.heap.new_table()?;
+        set_metafield(&mut vm, metatable, b"__add", Value::native(add))?;
+        vm.heap.resolve_table_mut(table)?.metatable = Some(metatable);
+
+        let method = vm
+            .call_binary_metamethod(Value::table(table), Value::integer(5), "__add", 0)?
+            .ok_or_else(|| KError::new(KErrorKind::Runtime("missing __add".to_owned()), None))?;
+        assert_eq!(method, Value::integer(42));
+
+        let value = vm.arithmetic(ArithmeticOp::Add, Value::table(table), Value::integer(5))?;
+        assert_eq!(value, Value::integer(42));
+        Ok(())
+    }
+
+    #[test]
+    fn comparison_uses_eq_metamethod() -> Result<(), Box<dyn std::error::Error>> {
+        fn eq(_: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+            assert_eq!(args.len(), 2);
+            assert!(matches!(test_arg(args, 0)?, Value::Table(_)));
+            assert!(matches!(test_arg(args, 1)?, Value::Table(_)));
+            Ok(vec![Value::boolean(true)])
+        }
+
+        let mut vm = Vm::new()?;
+        let left = vm.heap.new_table()?;
+        let right = vm.heap.new_table()?;
+        let metatable = vm.heap.new_table()?;
+        set_metafield(&mut vm, metatable, b"__eq", Value::native(eq))?;
+        vm.heap.resolve_table_mut(left)?.metatable = Some(metatable);
+        vm.heap.resolve_table_mut(right)?.metatable = Some(metatable);
+
+        let value = vm.compare(CompareOp::Eq, Value::table(left), Value::table(right))?;
+        assert!(value);
+        Ok(())
+    }
+
+    #[test]
+    fn concat_uses_concat_metamethod() -> Result<(), Box<dyn std::error::Error>> {
+        fn concat(_: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+            assert_eq!(args.len(), 2);
+            assert!(matches!(test_arg(args, 0)?, Value::Table(_)));
+            assert_eq!(test_arg(args, 1)?, Value::integer(5));
+            Ok(vec![Value::integer(77)])
+        }
+
+        let mut vm = Vm::new()?;
+        let table = vm.heap.new_table()?;
+        let metatable = vm.heap.new_table()?;
+        set_metafield(&mut vm, metatable, b"__concat", Value::native(concat))?;
+        vm.heap.resolve_table_mut(table)?.metatable = Some(metatable);
+
+        let result = vm.concat_values_for_test(&[Value::table(table), Value::integer(5)])?;
+        assert_eq!(result, Value::integer(77));
+        Ok(())
+    }
+
+    #[test]
+    fn bitwise_uses_string_metamethod_when_coercion_fails() -> Result<(), Box<dyn std::error::Error>>
+    {
+        fn band(_: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+            assert_eq!(args.len(), 2);
+            assert!(matches!(test_arg(args, 0)?, Value::String(_)));
+            assert_eq!(test_arg(args, 1)?, Value::integer(5));
+            Ok(vec![Value::integer(13)])
+        }
+
+        let mut vm = Vm::new()?;
+        let string_metatable = vm.heap.new_table()?;
+        set_metafield(&mut vm, string_metatable, b"__band", Value::native(band))?;
+        vm.string_metatable = string_metatable;
+
+        let value = intern_string(&mut vm, b"not-an-integer")?;
+        let result = vm.arithmetic(ArithmeticOp::BitAnd, value, Value::integer(5))?;
+        assert_eq!(result, Value::integer(13));
+        Ok(())
+    }
+
+    #[test]
+    fn bitwise_uses_string_metamethod_for_non_utf8_strings()
+    -> Result<(), Box<dyn std::error::Error>> {
+        fn bor(_: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+            assert_eq!(args.len(), 2);
+            assert!(matches!(test_arg(args, 0)?, Value::String(_)));
+            assert_eq!(test_arg(args, 1)?, Value::integer(5));
+            Ok(vec![Value::integer(21)])
+        }
+
+        let mut vm = Vm::new()?;
+        let string_metatable = vm.heap.new_table()?;
+        set_metafield(&mut vm, string_metatable, b"__bor", Value::native(bor))?;
+        vm.string_metatable = string_metatable;
+
+        let value = intern_string(&mut vm, b"\xff")?;
+        let result = vm.arithmetic(ArithmeticOp::BitOr, value, Value::integer(5))?;
+        assert_eq!(result, Value::integer(21));
+        Ok(())
+    }
+
+    #[test]
+    fn bitwise_shifts_follow_lua_negative_and_large_shift_rules()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut vm = Vm::new()?;
+
+        assert_eq!(
+            vm.arithmetic(
+                ArithmeticOp::ShiftLeft,
+                Value::integer(16),
+                Value::integer(-3)
+            )?,
+            Value::integer(16 >> 3)
+        );
+        assert_eq!(
+            vm.arithmetic(
+                ArithmeticOp::ShiftRight,
+                Value::integer(16),
+                Value::integer(-3)
+            )?,
+            Value::integer(16 << 3)
+        );
+        assert_eq!(
+            vm.arithmetic(
+                ArithmeticOp::ShiftLeft,
+                Value::integer(-1),
+                Value::integer(64)
+            )?,
+            Value::integer(0)
+        );
+        assert_eq!(
+            vm.arithmetic(
+                ArithmeticOp::ShiftRight,
+                Value::integer(-1),
+                Value::integer(64)
+            )?,
+            Value::integer(0)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn unary_minus_bitnot_and_length_use_metamethods() -> Result<(), Box<dyn std::error::Error>> {
+        fn unm(_: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+            assert_eq!(args.len(), 1);
+            let _ = test_arg(args, 0)?;
+            Ok(vec![Value::integer(-9)])
+        }
+
+        fn bnot(_: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+            assert_eq!(args.len(), 1);
+            let _ = test_arg(args, 0)?;
+            Ok(vec![Value::integer(7)])
+        }
+
+        fn len(_: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+            assert_eq!(args.len(), 1);
+            let _ = test_arg(args, 0)?;
+            Ok(vec![Value::integer(33)])
+        }
+
+        let mut vm = Vm::new()?;
+        let table = vm.heap.new_table()?;
+        let metatable = vm.heap.new_table()?;
+        set_metafield(&mut vm, metatable, b"__unm", Value::native(unm))?;
+        set_metafield(&mut vm, metatable, b"__bnot", Value::native(bnot))?;
+        set_metafield(&mut vm, metatable, b"__len", Value::native(len))?;
+        vm.heap.resolve_table_mut(table)?.metatable = Some(metatable);
+
+        assert_eq!(
+            vm.unary(UnaryOpKind::Minus, Value::table(table))?,
+            Value::integer(-9)
+        );
+        assert_eq!(
+            vm.unary(UnaryOpKind::BitNot, Value::table(table))?,
+            Value::integer(7)
+        );
+        assert_eq!(
+            vm.unary(UnaryOpKind::Len, Value::table(table))?,
+            Value::integer(33)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn index_and_newindex_support_table_and_function_forms()
+    -> Result<(), Box<dyn std::error::Error>> {
+        fn indexer(_: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+            assert_eq!(args.len(), 2);
+            assert!(matches!(test_arg(args, 0)?, Value::Table(_)));
+            assert_eq!(test_arg(args, 1)?, Value::integer(9));
+            Ok(vec![Value::integer(99)])
+        }
+
+        fn newindexer(_: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+            assert_eq!(args.len(), 3);
+            assert!(matches!(test_arg(args, 0)?, Value::Table(_)));
+            assert_eq!(test_arg(args, 1)?, Value::integer(7));
+            assert_eq!(test_arg(args, 2)?, Value::integer(88));
+            Ok(Vec::new())
+        }
+
+        let mut vm = Vm::new()?;
+        let fallback = vm.heap.new_table()?;
+        vm.heap
+            .resolve_table_mut(fallback)?
+            .raw_set(Value::integer(9), Value::integer(11))?;
+
+        let base = vm.heap.new_table()?;
+        let metatable = vm.heap.new_table()?;
+        set_metafield(&mut vm, metatable, b"__index", Value::table(fallback))?;
+        set_metafield(&mut vm, metatable, b"__newindex", Value::table(fallback))?;
+        vm.heap.resolve_table_mut(base)?.metatable = Some(metatable);
+
+        let indexed = vm.table_get(Value::table(base), Value::integer(9))?;
+        assert_eq!(indexed, Value::integer(11));
+
+        vm.table_set(Value::table(base), Value::integer(7), Value::integer(88))?;
+        let stored = vm
+            .heap
+            .resolve_table(fallback)?
+            .raw_get(Value::integer(7))?;
+        assert_eq!(stored, Value::integer(88));
+
+        let function_mt = vm.heap.new_table()?;
+        set_metafield(&mut vm, function_mt, b"__index", Value::native(indexer))?;
+        set_metafield(
+            &mut vm,
+            function_mt,
+            b"__newindex",
+            Value::native(newindexer),
+        )?;
+        let function_table = vm.heap.new_table()?;
+        vm.heap.resolve_table_mut(function_table)?.metatable = Some(function_mt);
+        let function_indexed = vm.table_get(Value::table(function_table), Value::integer(9))?;
+        assert_eq!(function_indexed, Value::integer(99));
+        vm.table_set(
+            Value::table(function_table),
+            Value::integer(7),
+            Value::integer(88),
+        )?;
+
+        Ok(())
+    }
+
+    #[test]
+    fn index_and_newindex_loop_detection_is_clear() -> Result<(), Box<dyn std::error::Error>> {
+        let mut vm = Vm::new()?;
+        let table = vm.heap.new_table()?;
+        let metatable = vm.heap.new_table()?;
+        set_metafield(&mut vm, metatable, b"__index", Value::table(table))?;
+        set_metafield(&mut vm, metatable, b"__newindex", Value::table(table))?;
+        vm.heap.resolve_table_mut(table)?.metatable = Some(metatable);
+
+        let index_err = vm
+            .table_get(Value::table(table), Value::integer(1))
+            .err()
+            .ok_or_else(|| {
+                KError::new(KErrorKind::Runtime("expected loop error".to_owned()), None)
+            })?;
+        assert!(index_err.to_string().contains("gettable"));
+
+        let set_err = vm
+            .table_set(Value::table(table), Value::integer(1), Value::integer(2))
+            .err()
+            .ok_or_else(|| {
+                KError::new(KErrorKind::Runtime("expected loop error".to_owned()), None)
+            })?;
+        assert!(set_err.to_string().contains("settable"));
+
+        Ok(())
     }
 
     #[test]

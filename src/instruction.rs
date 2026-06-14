@@ -94,6 +94,11 @@ pub enum ArithmeticOp {
     FloorDiv,
     Mod,
     Pow,
+    BitOr,
+    BitXor,
+    BitAnd,
+    ShiftLeft,
+    ShiftRight,
 }
 
 impl ArithmeticOp {
@@ -106,6 +111,11 @@ impl ArithmeticOp {
             Self::FloorDiv => 4,
             Self::Mod => 5,
             Self::Pow => 6,
+            Self::BitOr => 7,
+            Self::BitXor => 8,
+            Self::BitAnd => 9,
+            Self::ShiftLeft => 10,
+            Self::ShiftRight => 11,
         }
     }
 
@@ -118,7 +128,38 @@ impl ArithmeticOp {
             4 => Ok(Self::FloorDiv),
             5 => Ok(Self::Mod),
             6 => Ok(Self::Pow),
+            7 => Ok(Self::BitOr),
+            8 => Ok(Self::BitXor),
+            9 => Ok(Self::BitAnd),
+            10 => Ok(Self::ShiftLeft),
+            11 => Ok(Self::ShiftRight),
             _ => Err(KError::bytecode(format!("unknown arithmetic opcode {tag}"))),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum UnaryOpKind {
+    Minus,
+    BitNot,
+    Len,
+}
+
+impl UnaryOpKind {
+    fn to_tag(self) -> u8 {
+        match self {
+            Self::Minus => 0,
+            Self::BitNot => 1,
+            Self::Len => 2,
+        }
+    }
+
+    fn from_tag(tag: u8) -> KResult<Self> {
+        match tag {
+            0 => Ok(Self::Minus),
+            1 => Ok(Self::BitNot),
+            2 => Ok(Self::Len),
+            _ => Err(KError::bytecode(format!("unknown unary opcode {tag}"))),
         }
     }
 }
@@ -272,6 +313,11 @@ pub enum Instruction {
         function: Register,
         args: u16,
     },
+    Unary {
+        op: UnaryOpKind,
+        dst: Register,
+        src: Register,
+    },
 }
 
 #[repr(u8)]
@@ -304,6 +350,7 @@ enum Opcode {
     JumpIfTrue = 24,
     JumpIfFalse = 25,
     TailCall = 26,
+    Unary = 27,
 }
 
 impl Opcode {
@@ -336,6 +383,7 @@ impl Opcode {
             24 => Ok(Self::JumpIfTrue),
             25 => Ok(Self::JumpIfFalse),
             26 => Ok(Self::TailCall),
+            27 => Ok(Self::Unary),
             _ => Err(KError::bytecode(format!("unknown opcode {value}"))),
         }
     }
@@ -518,6 +566,12 @@ impl Instruction {
                 write_register(writer, *function);
                 writer.write_u16(*args);
             }
+            Self::Unary { op, dst, src } => {
+                writer.write_u8(Opcode::Unary as u8);
+                writer.write_u8(op.to_tag());
+                write_register(writer, *dst);
+                write_register(writer, *src);
+            }
         }
     }
 
@@ -639,6 +693,11 @@ impl Instruction {
             Opcode::TailCall => Ok(Self::TailCall {
                 function: read_register(reader)?,
                 args: reader.read_u16()?,
+            }),
+            Opcode::Unary => Ok(Self::Unary {
+                op: UnaryOpKind::from_tag(reader.read_u8()?)?,
+                dst: read_register(reader)?,
+                src: read_register(reader)?,
             }),
         }
     }
