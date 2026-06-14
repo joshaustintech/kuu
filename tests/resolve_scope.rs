@@ -1,7 +1,7 @@
 use kuu::parser::Parser;
 use kuu::resolve::{
-    BindingTarget, DeclarationKind, FunctionKind, NameUseRecord, Resolver, ResolvedChunk,
-    ResolvedFunction,
+    BindingTarget, DeclarationKind, FunctionKind, NameUseRecord, ResolvedChunk, ResolvedFunction,
+    Resolver,
 };
 
 fn resolve(source: &str) -> Result<ResolvedChunk, String> {
@@ -131,7 +131,9 @@ fn function_statements_write_through_the_resolver() -> Result<(), String> {
     let write_use = use_binding(&chunk.root.uses, "X")?;
     assert!(write_use.is_write);
     match &write_use.binding {
-        BindingTarget::Global { explicit, readonly, .. } => {
+        BindingTarget::Global {
+            explicit, readonly, ..
+        } => {
             assert!(*explicit);
             assert!(!*readonly);
         }

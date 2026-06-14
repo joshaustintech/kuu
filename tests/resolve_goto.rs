@@ -9,9 +9,7 @@ fn resolve(source: &str) -> Result<(), String> {
 
 #[test]
 fn allows_forward_and_backward_jumps_in_the_same_block() -> Result<(), String> {
-    resolve(
-        "goto later\n::early::\ngoto early\n::later::\n",
-    )?;
+    resolve("goto later\n::early::\ngoto early\n::later::\n")?;
     Ok(())
 }
 

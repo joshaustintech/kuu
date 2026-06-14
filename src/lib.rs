@@ -9,11 +9,15 @@
     clippy::unwrap_used
 )]
 
-pub mod error;
 pub mod ast;
+mod bytecode;
+pub mod error;
+pub mod instruction;
 pub mod lexer;
 pub mod parser;
+pub mod proto;
 pub mod resolve;
+pub mod value;
 
 #[cfg(test)]
 mod tests {

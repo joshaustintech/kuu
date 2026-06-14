@@ -31,10 +31,7 @@ impl Resolver {
         Ok(())
     }
 
-    fn resolve_block<'a>(
-        frame: BlockFrame<'a>,
-        stack: &mut Vec<BlockFrame<'a>>,
-    ) -> KResult<()> {
+    fn resolve_block<'a>(frame: BlockFrame<'a>, stack: &mut Vec<BlockFrame<'a>>) -> KResult<()> {
         let mut local_labels = BTreeMap::<String, LocalLabel>::new();
         let mut declaration_indices = Vec::<usize>::new();
 
@@ -152,7 +149,10 @@ impl Resolver {
     }
 
     fn scope_crossing_error(span: KSpan, name: &str) -> KError {
-        KError::syntax(format!("goto '{}' would enter the scope of a declaration", name), span)
+        KError::syntax(
+            format!("goto '{}' would enter the scope of a declaration", name),
+            span,
+        )
     }
 
     fn collect_stmt_children<'a>(
@@ -194,7 +194,9 @@ impl Resolver {
             | Stmt::GlobalFunction { body, .. } => {
                 Self::push_function_body(body, children);
             }
-            Stmt::Assign { targets, values, .. } => {
+            Stmt::Assign {
+                targets, values, ..
+            } => {
                 for target in targets {
                     Self::collect_var_children(target, visible_labels, children)?;
                 }
@@ -213,7 +215,10 @@ impl Resolver {
                     Self::collect_expr_children(value, visible_labels, children)?;
                 }
             }
-            Stmt::GlobalAll { .. } | Stmt::Empty { .. } | Stmt::Label { .. } | Stmt::Break { .. } => {}
+            Stmt::GlobalAll { .. }
+            | Stmt::Empty { .. }
+            | Stmt::Label { .. }
+            | Stmt::Break { .. } => {}
             Stmt::Goto { .. } => {}
         }
 

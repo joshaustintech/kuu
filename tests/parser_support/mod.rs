@@ -4,9 +4,7 @@ use kuu::parser::Parser;
 #[allow(dead_code)]
 pub fn parse_snapshot(source: &str) -> Result<String, String> {
     let mut parser = Parser::new(source).map_err(|error| error.to_string())?;
-    let chunk = parser
-        .parse_chunk()
-        .map_err(|error| error.to_string())?;
+    let chunk = parser.parse_chunk().map_err(|error| error.to_string())?;
     Ok(chunk.snapshot())
 }
 
@@ -26,7 +24,10 @@ pub fn assert_snapshot(source: &str, expected: &str) -> Result<(), String> {
 pub fn assert_parse_error_contains(source: &str, needle: &str) -> Result<(), String> {
     let mut parser = Parser::new(source).map_err(|error| error.to_string())?;
     match parser.parse_chunk() {
-        Ok(chunk) => Err(format!("expected parse error for {:?}, got {:?}", source, chunk)),
+        Ok(chunk) => Err(format!(
+            "expected parse error for {:?}, got {:?}",
+            source, chunk
+        )),
         Err(error) => {
             let text = error.to_string();
             if text.contains(needle) {

@@ -22,12 +22,11 @@ fn all_upstream_lua_fixtures_parse() -> Result<(), String> {
         let source_bytes = fs::read(&path)
             .map_err(|error| format!("failed to read {}: {}", path.display(), error))?;
         let source = String::from_utf8_lossy(&source_bytes).into_owned();
-        let mut parser = Parser::new(&source).map_err(|error| {
-            format!("failed to init parser for {}: {}", path.display(), error)
-        })?;
-        parser.parse_chunk().map_err(|error| {
-            format!("failed to parse {}: {}", path.display(), error)
-        })?;
+        let mut parser = Parser::new(&source)
+            .map_err(|error| format!("failed to init parser for {}: {}", path.display(), error))?;
+        parser
+            .parse_chunk()
+            .map_err(|error| format!("failed to parse {}: {}", path.display(), error))?;
     }
 
     Ok(())

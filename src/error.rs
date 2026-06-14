@@ -39,6 +39,7 @@ impl fmt::Display for KSpan {
 pub enum KErrorKind {
     Syntax(String),
     Runtime(String),
+    Bytecode(String),
     Io(String),
 }
 
@@ -47,13 +48,17 @@ impl KErrorKind {
         match self {
             Self::Syntax(_) => "syntax error",
             Self::Runtime(_) => "runtime error",
+            Self::Bytecode(_) => "bytecode error",
             Self::Io(_) => "io error",
         }
     }
 
     fn message(&self) -> &str {
         match self {
-            Self::Syntax(message) | Self::Runtime(message) | Self::Io(message) => message,
+            Self::Syntax(message)
+            | Self::Runtime(message)
+            | Self::Bytecode(message)
+            | Self::Io(message) => message,
         }
     }
 }
@@ -81,6 +86,10 @@ impl KError {
 
     pub fn runtime(message: impl Into<String>, span: KSpan) -> Self {
         Self::new(KErrorKind::Runtime(message.into()), Some(span))
+    }
+
+    pub fn bytecode(message: impl Into<String>) -> Self {
+        Self::new(KErrorKind::Bytecode(message.into()), None)
     }
 
     pub fn io(message: impl Into<String>) -> Self {
