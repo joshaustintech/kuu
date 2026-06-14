@@ -95,6 +95,29 @@ fn sample_instructions() -> KResult<Vec<Instruction>> {
         Instruction::Close {
             from: Register::new(30),
         },
+        Instruction::NewTable {
+            dst: Register::new(31),
+        },
+        Instruction::GetUpvalue {
+            dst: Register::new(32),
+            upvalue: 2,
+        },
+        Instruction::SetUpvalue {
+            src: Register::new(33),
+            upvalue: 3,
+        },
+        Instruction::JumpIfTrue {
+            cond: Register::new(34),
+            offset: JumpOffset::new(11)?,
+        },
+        Instruction::JumpIfFalse {
+            cond: Register::new(35),
+            offset: JumpOffset::new(-9)?,
+        },
+        Instruction::TailCall {
+            function: Register::new(36),
+            args: 4,
+        },
     ])
 }
 
@@ -123,8 +146,8 @@ fn sample_proto() -> KResult<Proto> {
             stack_size: 1,
             upvalues: Vec::new(),
             constants: vec![Constant::String(b"inner".to_vec())],
-            instructions: vec![Instruction::Close {
-                from: Register::new(0),
+            instructions: vec![Instruction::NewTable {
+                dst: Register::new(0),
             }],
             nested: Vec::new(),
         }],

@@ -249,6 +249,29 @@ pub enum Instruction {
     Close {
         from: Register,
     },
+    NewTable {
+        dst: Register,
+    },
+    GetUpvalue {
+        dst: Register,
+        upvalue: u16,
+    },
+    SetUpvalue {
+        src: Register,
+        upvalue: u16,
+    },
+    JumpIfTrue {
+        cond: Register,
+        offset: JumpOffset,
+    },
+    JumpIfFalse {
+        cond: Register,
+        offset: JumpOffset,
+    },
+    TailCall {
+        function: Register,
+        args: u16,
+    },
 }
 
 #[repr(u8)]
@@ -275,6 +298,12 @@ enum Opcode {
     ForLoop = 18,
     Concat = 19,
     Close = 20,
+    NewTable = 21,
+    GetUpvalue = 22,
+    SetUpvalue = 23,
+    JumpIfTrue = 24,
+    JumpIfFalse = 25,
+    TailCall = 26,
 }
 
 impl Opcode {
@@ -301,6 +330,12 @@ impl Opcode {
             18 => Ok(Self::ForLoop),
             19 => Ok(Self::Concat),
             20 => Ok(Self::Close),
+            21 => Ok(Self::NewTable),
+            22 => Ok(Self::GetUpvalue),
+            23 => Ok(Self::SetUpvalue),
+            24 => Ok(Self::JumpIfTrue),
+            25 => Ok(Self::JumpIfFalse),
+            26 => Ok(Self::TailCall),
             _ => Err(KError::bytecode(format!("unknown opcode {value}"))),
         }
     }
@@ -454,6 +489,35 @@ impl Instruction {
                 writer.write_u8(Opcode::Close as u8);
                 write_register(writer, *from);
             }
+            Self::NewTable { dst } => {
+                writer.write_u8(Opcode::NewTable as u8);
+                write_register(writer, *dst);
+            }
+            Self::GetUpvalue { dst, upvalue } => {
+                writer.write_u8(Opcode::GetUpvalue as u8);
+                write_register(writer, *dst);
+                writer.write_u16(*upvalue);
+            }
+            Self::SetUpvalue { src, upvalue } => {
+                writer.write_u8(Opcode::SetUpvalue as u8);
+                write_register(writer, *src);
+                writer.write_u16(*upvalue);
+            }
+            Self::JumpIfTrue { cond, offset } => {
+                writer.write_u8(Opcode::JumpIfTrue as u8);
+                write_register(writer, *cond);
+                writer.write_i32(offset.value());
+            }
+            Self::JumpIfFalse { cond, offset } => {
+                writer.write_u8(Opcode::JumpIfFalse as u8);
+                write_register(writer, *cond);
+                writer.write_i32(offset.value());
+            }
+            Self::TailCall { function, args } => {
+                writer.write_u8(Opcode::TailCall as u8);
+                write_register(writer, *function);
+                writer.write_u16(*args);
+            }
         }
     }
 
@@ -552,6 +616,29 @@ impl Instruction {
             }),
             Opcode::Close => Ok(Self::Close {
                 from: read_register(reader)?,
+            }),
+            Opcode::NewTable => Ok(Self::NewTable {
+                dst: read_register(reader)?,
+            }),
+            Opcode::GetUpvalue => Ok(Self::GetUpvalue {
+                dst: read_register(reader)?,
+                upvalue: reader.read_u16()?,
+            }),
+            Opcode::SetUpvalue => Ok(Self::SetUpvalue {
+                src: read_register(reader)?,
+                upvalue: reader.read_u16()?,
+            }),
+            Opcode::JumpIfTrue => Ok(Self::JumpIfTrue {
+                cond: read_register(reader)?,
+                offset: JumpOffset::from_i32(reader.read_i32()?),
+            }),
+            Opcode::JumpIfFalse => Ok(Self::JumpIfFalse {
+                cond: read_register(reader)?,
+                offset: JumpOffset::from_i32(reader.read_i32()?),
+            }),
+            Opcode::TailCall => Ok(Self::TailCall {
+                function: read_register(reader)?,
+                args: reader.read_u16()?,
             }),
         }
     }
