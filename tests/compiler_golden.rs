@@ -202,3 +202,26 @@ fn method_syntax_and_bytecode_encoding_roundtrip() -> Result<(), String> {
     assert_eq!(decoded, proto);
     Ok(())
 }
+
+#[test]
+fn single_trailing_call_argument_preserves_all_results() -> Result<(), String> {
+    let proto = compile(
+        "local function pack(...)\n\
+           return ...\n\
+         end\n\
+         print(pack(1, 2, 3))\n",
+    )?;
+
+    assert!(proto.instructions.iter().any(|instruction| matches!(
+        instruction,
+        Instruction::Call {
+            results,
+            ..
+        } if *results == u16::MAX
+    )));
+    assert!(proto.instructions.iter().any(|instruction| matches!(
+        instruction,
+        Instruction::Call { args, .. } if *args == u16::MAX
+    )));
+    Ok(())
+}

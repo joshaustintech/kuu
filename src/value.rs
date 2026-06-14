@@ -1,5 +1,24 @@
 use crate::error::KResult;
+use std::collections::BTreeMap;
 use std::fmt;
+use std::sync::{Mutex, OnceLock};
+
+static STRING_REGISTRY: OnceLock<Mutex<BTreeMap<u64, Vec<u8>>>> = OnceLock::new();
+
+fn string_registry() -> &'static Mutex<BTreeMap<u64, Vec<u8>>> {
+    STRING_REGISTRY.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+pub(crate) fn register_string(handle: StringHandle, bytes: &[u8]) {
+    if let Ok(mut registry) = string_registry().lock() {
+        registry.insert(handle.raw(), bytes.to_vec());
+    }
+}
+
+pub(crate) fn lookup_string(handle: StringHandle) -> Option<Vec<u8>> {
+    let guard = string_registry().lock().ok()?;
+    guard.get(&handle.raw()).cloned()
+}
 
 macro_rules! handle_type {
     ($name:ident) => {
@@ -18,7 +37,11 @@ macro_rules! handle_type {
 
         impl fmt::Display for $name {
             fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-                write!(f, "{}({})", stringify!($name), self.0)
+                if let Some(bytes) = lookup_string(StringHandle::new(self.0)) {
+                    write!(f, "{}", String::from_utf8_lossy(&bytes))
+                } else {
+                    write!(f, "{}({})", stringify!($name), self.0)
+                }
             }
         }
     };

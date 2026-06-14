@@ -272,7 +272,7 @@ impl FunctionState {
             block_depth: 0,
             next_local_slot: 0,
             next_global_slot: 0,
-            next_upvalue_slot: 1,
+            next_upvalue_slot: 0,
             next_decl_id: 0,
             block_frames: Vec::new(),
         }

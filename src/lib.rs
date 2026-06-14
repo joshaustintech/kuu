@@ -19,6 +19,7 @@ pub mod parser;
 pub mod proto;
 pub mod resolve;
 pub mod value;
+pub mod vm;
 
 #[cfg(test)]
 mod tests {

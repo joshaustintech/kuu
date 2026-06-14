@@ -293,7 +293,8 @@ impl<'a> FunctionCompiler<'a> {
                 targets, values, ..
             } => self.compile_assignment(targets, values),
             Stmt::Call { call, .. } => {
-                let _ = self.compile_call_into(Register::new(0), call, 0, false)?;
+                let scratch = self.alloc_temp()?;
+                let _ = self.compile_call_into(scratch, call, 0, false)?;
                 Ok(())
             }
         }
@@ -305,6 +306,17 @@ impl<'a> FunctionCompiler<'a> {
             self.instructions.push(Instruction::Return {
                 first: Register::new(0),
                 count: 0,
+            });
+            return Ok(());
+        }
+
+        if return_stmt.values.len() == 1
+            && matches!(return_stmt.values.first(), Some(Expr::Vararg { .. }))
+        {
+            self.emit_close_for_active_scopes()?;
+            self.instructions.push(Instruction::Return {
+                first: Register::new(0),
+                count: u16::MAX,
             });
             return Ok(());
         }
@@ -749,7 +761,12 @@ impl<'a> FunctionCompiler<'a> {
         expr: &Expr,
         desired_results: usize,
     ) -> KResult<usize> {
-        self.reserve_temp_space(dst, desired_results.max(1))?;
+        let reserve_count = if desired_results == usize::MAX {
+            1
+        } else {
+            desired_results.max(1)
+        };
+        self.reserve_temp_space(dst, reserve_count)?;
         match expr {
             Expr::Nil { .. } => {
                 self.instructions.push(Instruction::LoadNil { dst });
@@ -773,6 +790,11 @@ impl<'a> FunctionCompiler<'a> {
                 Ok(1)
             }
             Expr::Vararg { .. } => {
+                if desired_results == usize::MAX {
+                    self.instructions
+                        .push(Instruction::Vararg { dst, count: None });
+                    return Ok(usize::MAX);
+                }
                 self.instructions.push(Instruction::Vararg {
                     dst,
                     count: if desired_results > 1 {
@@ -867,7 +889,7 @@ impl<'a> FunctionCompiler<'a> {
         start: Register,
         values: &[Expr],
         desired_total: Option<usize>,
-        return_context: bool,
+        allow_multi_last: bool,
     ) -> KResult<usize> {
         let mut written = 0usize;
         for (index, value) in values.iter().enumerate() {
@@ -883,15 +905,20 @@ impl<'a> FunctionCompiler<'a> {
                     )
                     .ok_or_else(|| KError::bytecode("register overflow"))?,
             );
-            let count = if index + 1 == values.len() && remaining > 1 {
+            let count = if index + 1 == values.len() {
                 match value {
-                    Expr::Call { .. } => remaining,
-                    Expr::Vararg { .. }
-                        if return_context && values.len() == 1 && desired_total.is_none() =>
+                    Expr::Call { .. }
+                        if allow_multi_last && desired_total.is_none() && values.len() == 1 =>
                     {
-                        1
+                        usize::MAX
                     }
-                    Expr::Vararg { .. } => remaining,
+                    Expr::Vararg { .. }
+                        if allow_multi_last && desired_total.is_none() && values.len() == 1 =>
+                    {
+                        usize::MAX
+                    }
+                    Expr::Call { .. } if remaining > 1 => remaining,
+                    Expr::Vararg { .. } if remaining > 1 => remaining,
                     _ => 1,
                 }
             } else {
@@ -899,7 +926,9 @@ impl<'a> FunctionCompiler<'a> {
             };
 
             let produced = self.compile_expr_into(target, value, count)?;
-
+            if produced == usize::MAX {
+                return Ok(usize::MAX);
+            }
             written = written.saturating_add(produced);
         }
 
@@ -1094,8 +1123,12 @@ impl<'a> FunctionCompiler<'a> {
             )?;
             self.instructions.push(Instruction::TailCall {
                 function: dst,
-                args: u16::try_from(arg_count)
-                    .map_err(|_| KError::bytecode("tail call arity exceeds u16"))?,
+                args: if arg_count == usize::MAX {
+                    u16::MAX
+                } else {
+                    u16::try_from(arg_count)
+                        .map_err(|_| KError::bytecode("tail call arity exceeds u16"))?
+                },
             });
             return Ok(0);
         }
@@ -1126,12 +1159,24 @@ impl<'a> FunctionCompiler<'a> {
             let arg_count = self.compile_call_args(key, &call.args, true)?;
             self.instructions.push(Instruction::Call {
                 function: dst,
-                args: u16::try_from(arg_count + 1)
-                    .map_err(|_| KError::bytecode("call arity exceeds u16"))?,
-                results: u16::try_from(desired_results)
-                    .map_err(|_| KError::bytecode("result count exceeds u16"))?,
+                args: if arg_count == usize::MAX {
+                    u16::MAX
+                } else {
+                    u16::try_from(arg_count + 1)
+                        .map_err(|_| KError::bytecode("call arity exceeds u16"))?
+                },
+                results: if desired_results == usize::MAX {
+                    u16::MAX
+                } else {
+                    u16::try_from(desired_results)
+                        .map_err(|_| KError::bytecode("result count exceeds u16"))?
+                },
             });
-            Ok(desired_results.max(1))
+            Ok(if desired_results == usize::MAX {
+                usize::MAX
+            } else {
+                desired_results.max(1)
+            })
         } else {
             let prefix = self.compile_expr_result(&call.prefix)?;
             self.emit_move(dst, prefix)?;
@@ -1146,12 +1191,24 @@ impl<'a> FunctionCompiler<'a> {
             )?;
             self.instructions.push(Instruction::Call {
                 function: dst,
-                args: u16::try_from(arg_count)
-                    .map_err(|_| KError::bytecode("call arity exceeds u16"))?,
-                results: u16::try_from(desired_results)
-                    .map_err(|_| KError::bytecode("result count exceeds u16"))?,
+                args: if arg_count == usize::MAX {
+                    u16::MAX
+                } else {
+                    u16::try_from(arg_count)
+                        .map_err(|_| KError::bytecode("call arity exceeds u16"))?
+                },
+                results: if desired_results == usize::MAX {
+                    u16::MAX
+                } else {
+                    u16::try_from(desired_results)
+                        .map_err(|_| KError::bytecode("result count exceeds u16"))?
+                },
             });
-            Ok(desired_results.max(1))
+            Ok(if desired_results == usize::MAX {
+                usize::MAX
+            } else {
+                desired_results.max(1)
+            })
         }
     }
 
