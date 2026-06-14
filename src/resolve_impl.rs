@@ -188,6 +188,7 @@ pub(crate) struct ScopeSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct BlockFrame {
     pub(crate) previous_policy: GlobalPolicy,
+    pub(crate) previous_global_default: bool,
     pub(crate) local_undos: Vec<(String, Option<Binding>)>,
     pub(crate) global_undos: Vec<(String, Option<GlobalBinding>)>,
     pub(crate) label_undos: Vec<(String, Option<LabelRecord>)>,
@@ -210,6 +211,7 @@ pub(crate) struct FunctionState {
     pub(crate) visible_labels: BTreeMap<String, LabelRecord>,
     pub(crate) implicit_globals: BTreeMap<String, usize>,
     pub(crate) global_policy: GlobalPolicy,
+    pub(crate) has_global_default: bool,
     pub(crate) ancestor_scopes: Vec<ScopeSnapshot>,
     pub(crate) active_decls: BTreeSet<usize>,
     pub(crate) block_depth: usize,
@@ -267,6 +269,7 @@ impl FunctionState {
             visible_labels: BTreeMap::new(),
             implicit_globals: BTreeMap::new(),
             global_policy,
+            has_global_default: false,
             ancestor_scopes,
             active_decls: BTreeSet::new(),
             block_depth: 0,
@@ -295,6 +298,7 @@ impl FunctionState {
     pub(crate) fn push_block(&mut self) {
         self.block_frames.push(BlockFrame {
             previous_policy: self.global_policy,
+            previous_global_default: self.has_global_default,
             local_undos: Vec::new(),
             global_undos: Vec::new(),
             label_undos: Vec::new(),
@@ -342,6 +346,7 @@ impl FunctionState {
         }
 
         self.global_policy = frame.previous_policy;
+        self.has_global_default = frame.previous_global_default;
         self.block_depth = self.block_depth.saturating_sub(1);
     }
 

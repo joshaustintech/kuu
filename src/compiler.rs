@@ -908,14 +908,8 @@ impl<'a> FunctionCompiler<'a> {
             );
             let count = if index + 1 == values.len() {
                 match value {
-                    Expr::Call { .. }
-                        if allow_multi_last && desired_total.is_none() && values.len() == 1 =>
-                    {
-                        usize::MAX
-                    }
-                    Expr::Vararg { .. }
-                        if allow_multi_last && desired_total.is_none() && values.len() == 1 =>
-                    {
+                    Expr::Call { .. } if allow_multi_last && desired_total.is_none() => usize::MAX,
+                    Expr::Vararg { .. } if allow_multi_last && desired_total.is_none() => {
                         usize::MAX
                     }
                     Expr::Call { .. } if remaining > 1 => remaining,
@@ -1016,8 +1010,15 @@ impl<'a> FunctionCompiler<'a> {
                 Ok(1)
             }
             BinaryOp::Concat => {
-                let left_reg = self.compile_expr_result(left)?;
-                let right_reg = self.compile_expr_result(right)?;
+                self.reserve_temp_space(dst, 2)?;
+                let left_reg = dst;
+                let right_reg = Register::new(
+                    dst.index()
+                        .checked_add(1)
+                        .ok_or_else(|| KError::bytecode("register overflow"))?,
+                );
+                self.compile_expr_into(left_reg, left, 1)?;
+                self.compile_expr_into(right_reg, right, 1)?;
                 self.instructions.push(Instruction::Concat {
                     dst,
                     first: left_reg,

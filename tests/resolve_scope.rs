@@ -173,3 +173,35 @@ fn multi_level_captures_have_stable_source_depth() -> Result<(), String> {
     assert_eq!(captured.source_depth, 2);
     Ok(())
 }
+
+#[test]
+fn parent_functions_propagate_child_upvalues_to_grandchildren() -> Result<(), String> {
+    let chunk = resolve(
+        "local format = string.format\n\
+         local function outer()\n\
+           local function middle()\n\
+             return function(m)\n\
+               return format(\"%.1f\", m)\n\
+             end\n\
+           end\n\
+         end\n",
+    )?;
+
+    let outer = child(&chunk.root, 0)?;
+    let middle = child(outer, 0)?;
+    let inner = child(middle, 0)?;
+
+    assert!(
+        middle
+            .upvalues
+            .iter()
+            .any(|upvalue| upvalue.name == "format")
+    );
+    assert!(
+        inner
+            .upvalues
+            .iter()
+            .any(|upvalue| upvalue.name == "format")
+    );
+    Ok(())
+}

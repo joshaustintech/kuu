@@ -172,7 +172,9 @@ impl Resolver {
                     true,
                     DeclarationKind::Global,
                 );
-                state.global_policy = GlobalPolicy::DeclaredOnly;
+                if !state.has_global_default {
+                    state.global_policy = GlobalPolicy::DeclaredOnly;
+                }
                 self.resolve_function_body(body, FunctionKind::GlobalFunction, state)
             }
             Stmt::LocalDecl {
@@ -225,7 +227,9 @@ impl Resolver {
                         DeclarationKind::Global,
                     );
                 }
-                state.global_policy = GlobalPolicy::DeclaredOnly;
+                if !state.has_global_default {
+                    state.global_policy = GlobalPolicy::DeclaredOnly;
+                }
                 Ok(())
             }
             Stmt::GlobalAll {
@@ -234,6 +238,7 @@ impl Resolver {
             } => {
                 let readonly = matches!(prefix_attribute, Some(attr) if attr.name == "const");
                 let _ = state.add_global_default(readonly, *span);
+                state.has_global_default = true;
                 state.global_policy = if readonly {
                     GlobalPolicy::Readonly
                 } else {
@@ -326,6 +331,15 @@ impl Resolver {
 
         self.resolve_block(&body.block, &mut child)?;
         child.pop_block();
+
+        for upvalue in &child.upvalues {
+            let _ = parent.capture_upvalue(
+                &upvalue.name,
+                upvalue.readonly,
+                upvalue.declaration_span,
+                upvalue.source_depth,
+            );
+        }
         parent.children.push(child.finish());
         Ok(())
     }

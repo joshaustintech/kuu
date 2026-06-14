@@ -258,3 +258,19 @@ fn single_trailing_call_argument_preserves_all_results() -> Result<(), String> {
     )));
     Ok(())
 }
+
+#[test]
+fn vararg_function_calls_keep_all_explicit_args() -> Result<(), String> {
+    let proto = compile(
+        "local function pack(...)\n\
+           return ...\n\
+         end\n\
+         local x = pack(1, 2)\n",
+    )?;
+
+    assert!(proto.instructions.iter().any(|instruction| matches!(
+        instruction,
+        Instruction::Call { args, .. } if *args == 2
+    )));
+    Ok(())
+}

@@ -1,13 +1,22 @@
+use crate::compiler::Compiler;
 use crate::error::{KError, KErrorKind, KResult};
 use crate::instruction::{
     ArithmeticOp, CompareOp, ConstantIndex, Instruction, JumpOffset, PrototypeIndex, Register,
     UnaryOpKind,
 };
+use crate::parser::Parser;
 use crate::proto::{Constant, Proto};
-use crate::value::{ClosureHandle, LuaKey, NativeFunction, StringHandle, TableHandle, Value};
+use crate::value::{
+    ClosureHandle, LuaKey, NativeFunction, StringHandle, TableHandle, UserdataHandle, Value,
+};
+use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::convert::TryFrom;
-use std::io::{self, Write};
+use std::fs::{self, File};
+use std::io::{self, Read, Write};
+use std::process::Command;
+use std::rc::Rc;
+use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
 struct UpvalueHandle(u64);
@@ -62,6 +71,36 @@ struct Upvalue {
 struct ClosureObject {
     proto: Proto,
     upvalues: Vec<UpvalueHandle>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+enum UserdataObject {
+    File(FileObject),
+    Lines(LineIteratorObject),
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+struct FileObject {
+    kind: FileKind,
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+enum FileKind {
+    File(File),
+    Stdin,
+    Stdout,
+    Stderr,
+    Closed,
+}
+
+#[allow(dead_code)]
+#[derive(Debug)]
+struct LineIteratorObject {
+    lines: Vec<Vec<u8>>,
+    index: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -173,6 +212,74 @@ impl TableObject {
             .iter()
             .copied()
             .chain(self.hash.values().copied())
+    }
+
+    fn raw_len(&self) -> usize {
+        self.array.len()
+    }
+
+    fn next_key(&self, key: Option<Value>) -> Option<(Value, Value)> {
+        match key {
+            None => {
+                if let Some(value) = self.array.first().copied() {
+                    return Some((Value::integer(1), value));
+                }
+                self.hash
+                    .iter()
+                    .next()
+                    .map(|(k, v)| (key_from_luakey(*k), *v))
+            }
+            Some(Value::Integer(integer)) if integer >= 0 => {
+                let mut index = integer as usize;
+                if index < self.array.len() {
+                    index += 1;
+                    if let Some(value) = self.array.get(index - 1).copied() {
+                        return Some((Value::integer(index as i64), value));
+                    }
+                }
+                for (hash_key, value) in self.hash.iter() {
+                    if let LuaKey::Integer(current) = hash_key
+                        && *current > integer
+                    {
+                        return Some((Value::integer(*current), *value));
+                    }
+                }
+                None
+            }
+            Some(other) => {
+                let current_key = other.hash_key()?;
+                let mut seen = false;
+                for (hash_key, value) in &self.hash {
+                    if seen {
+                        return Some((key_from_luakey(*hash_key), *value));
+                    }
+                    if *hash_key == current_key {
+                        seen = true;
+                    }
+                }
+                None
+            }
+        }
+    }
+}
+
+fn key_from_luakey(key: LuaKey) -> Value {
+    match key {
+        LuaKey::Nil => Value::nil(),
+        LuaKey::Boolean(value) => Value::boolean(value),
+        LuaKey::Integer(value) => Value::integer(value),
+        LuaKey::Number(bits) => Value::number(f64::from_bits(bits)),
+        LuaKey::String(handle) => Value::string(handle),
+        LuaKey::Table(handle) => Value::table(handle),
+        LuaKey::Closure(handle) => Value::closure(handle),
+        LuaKey::NativeFunction(function) => {
+            let ptr = function as *const ();
+            let _ = ptr;
+            Value::nil()
+        }
+        LuaKey::Thread(handle) => Value::thread(handle),
+        LuaKey::Userdata(handle) => Value::userdata(handle),
+        LuaKey::LightUserdata(value) => Value::light_userdata(value),
     }
 }
 
@@ -418,6 +525,2085 @@ pub fn native_collectgarbage(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>>
     vm.collectgarbage_request(args)
 }
 
+pub fn native_assert(_vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    if matches!(
+        args.first().copied().unwrap_or(Value::nil()),
+        Value::Nil | Value::Boolean(false)
+    ) {
+        let message = match args.get(1).copied() {
+            Some(Value::String(_)) | None => "assertion failed!".to_owned(),
+            Some(other) => format!("assertion failed!: {}", other),
+        };
+        return Err(KError::new(KErrorKind::Runtime(message), None));
+    }
+    Ok(args.to_vec())
+}
+
+pub fn native_error(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let message = match args.first().copied().unwrap_or(Value::nil()) {
+        Value::String(handle) => vm.format_value(Value::String(handle))?,
+        other => vm.format_value(other)?,
+    };
+    Err(KError::new(KErrorKind::Runtime(message), None))
+}
+
+pub fn native_getmetatable(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let value = args.first().copied().unwrap_or(Value::nil());
+    let result = match value {
+        Value::Table(handle) => {
+            let table = vm.heap.resolve_table(handle)?;
+            match table.metatable {
+                Some(metatable) => Value::table(metatable),
+                None => Value::nil(),
+            }
+        }
+        Value::String(_) => Value::table(vm.string_metatable),
+        _ => Value::nil(),
+    };
+    Ok(vec![result])
+}
+
+pub fn native_setmetatable(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let table = match args.first().copied().unwrap_or(Value::nil()) {
+        Value::Table(handle) => handle,
+        other => {
+            return Err(KError::new(
+                KErrorKind::Runtime(format!(
+                    "setmetatable expects a table, got {}",
+                    vm.value_type_name(other)
+                )),
+                None,
+            ));
+        }
+    };
+    let metatable = match args.get(1).copied().unwrap_or(Value::nil()) {
+        Value::Table(handle) => Some(handle),
+        Value::Nil => None,
+        other => {
+            return Err(KError::new(
+                KErrorKind::Runtime(format!(
+                    "setmetatable expects a table or nil, got {}",
+                    vm.value_type_name(other)
+                )),
+                None,
+            ));
+        }
+    };
+    vm.heap.resolve_table_mut(table)?.metatable = metatable;
+    Ok(vec![Value::table(table)])
+}
+
+pub fn native_rawequal(_vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let left = args.first().copied().unwrap_or(Value::nil());
+    let right = args.get(1).copied().unwrap_or(Value::nil());
+    Ok(vec![Value::boolean(left == right)])
+}
+
+pub fn native_rawget(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let table = match args.first().copied().unwrap_or(Value::nil()) {
+        Value::Table(handle) => handle,
+        other => {
+            return Err(KError::new(
+                KErrorKind::Runtime(format!(
+                    "rawget expects a table, got {}",
+                    vm.value_type_name(other)
+                )),
+                None,
+            ));
+        }
+    };
+    let key = args.get(1).copied().unwrap_or(Value::nil());
+    let value = vm.heap.resolve_table(table)?.raw_get(key)?;
+    Ok(vec![value])
+}
+
+pub fn native_rawset(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let table = match args.first().copied().unwrap_or(Value::nil()) {
+        Value::Table(handle) => handle,
+        other => {
+            return Err(KError::new(
+                KErrorKind::Runtime(format!(
+                    "rawset expects a table, got {}",
+                    vm.value_type_name(other)
+                )),
+                None,
+            ));
+        }
+    };
+    let key = args.get(1).copied().unwrap_or(Value::nil());
+    let value = args.get(2).copied().unwrap_or(Value::nil());
+    vm.heap.resolve_table_mut(table)?.raw_set(key, value)?;
+    Ok(vec![Value::table(table)])
+}
+
+pub fn native_rawlen(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let value = args.first().copied().unwrap_or(Value::nil());
+    let len = match value {
+        Value::String(handle) => {
+            let bytes = vm.heap.string_bytes(handle).ok_or_else(|| {
+                KError::new(
+                    KErrorKind::Runtime("invalid string handle".to_owned()),
+                    None,
+                )
+            })?;
+            bytes.len()
+        }
+        Value::Table(handle) => vm.heap.resolve_table(handle)?.raw_len(),
+        other => {
+            return Err(KError::new(
+                KErrorKind::Runtime(format!(
+                    "rawlen expects a string or table, got {}",
+                    vm.value_type_name(other)
+                )),
+                None,
+            ));
+        }
+    };
+    Ok(vec![Value::integer(i64::try_from(len).map_err(|_| {
+        KError::new(KErrorKind::Runtime("raw length overflow".to_owned()), None)
+    })?)])
+}
+
+pub fn native_select(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    if let Some(Value::String(handle)) = args.first().copied()
+        && let Some(bytes) = vm.heap.string_bytes(handle)
+        && bytes == b"#"
+    {
+        return Ok(vec![Value::integer(
+            i64::try_from(args.len().saturating_sub(1)).map_err(|_| {
+                KError::new(
+                    KErrorKind::Runtime("select count overflow".to_owned()),
+                    None,
+                )
+            })?,
+        )]);
+    }
+    let start = match args.first().copied() {
+        Some(Value::Integer(value)) => value,
+        Some(Value::Number(value)) if value.fract() == 0.0 => value as i64,
+        _ => {
+            return Err(KError::new(
+                KErrorKind::Runtime("select expects an integer index or '#'".to_owned()),
+                None,
+            ));
+        }
+    };
+    if start < 1 {
+        return Err(KError::new(
+            KErrorKind::Runtime("select index must be positive".to_owned()),
+            None,
+        ));
+    }
+    let index = usize::try_from(start - 1).map_err(|_| {
+        KError::new(
+            KErrorKind::Runtime("select index overflow".to_owned()),
+            None,
+        )
+    })?;
+    let start = index.checked_add(1).ok_or_else(|| {
+        KError::new(
+            KErrorKind::Runtime("select index overflow".to_owned()),
+            None,
+        )
+    })?;
+    Ok(args
+        .get(start..)
+        .map_or_else(Vec::new, |slice| slice.to_vec()))
+}
+
+pub fn native_type(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let value = args.first().copied().unwrap_or(Value::nil());
+    let text = vm.value_type_name(value);
+    let handle = vm.heap.intern_string(text.as_bytes().to_vec())?;
+    Ok(vec![Value::string(handle)])
+}
+
+pub fn native_tostring(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let value = args.first().copied().unwrap_or(Value::nil());
+    let text = vm.format_value(value)?;
+    let handle = vm.heap.intern_string(text.into_bytes())?;
+    Ok(vec![Value::string(handle)])
+}
+
+pub fn native_tonumber(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let value = args.first().copied().unwrap_or(Value::nil());
+    let base = match args.get(1).copied() {
+        Some(Value::Integer(value)) if (2..=36).contains(&value) => Some(value as u32),
+        Some(Value::Nil) | None => None,
+        Some(other) => {
+            return Err(KError::new(
+                KErrorKind::Runtime(format!(
+                    "tonumber expects an integer base, got {}",
+                    vm.value_type_name(other)
+                )),
+                None,
+            ));
+        }
+    };
+
+    let result = match (value, base) {
+        (Value::Integer(value), None) => Some(Value::integer(value)),
+        (Value::Number(value), None) => Some(Value::number(value)),
+        (Value::String(handle), None) => {
+            let bytes = vm.heap.string_bytes(handle).ok_or_else(|| {
+                KError::new(
+                    KErrorKind::Runtime("invalid string handle".to_owned()),
+                    None,
+                )
+            })?;
+            match std::str::from_utf8(bytes) {
+                Ok(text) => match text.trim().parse::<i64>() {
+                    Ok(integer) => Some(Value::integer(integer)),
+                    Err(_) => match text.trim().parse::<f64>() {
+                        Ok(number) => Some(Value::number(number)),
+                        Err(_) => None,
+                    },
+                },
+                Err(_) => None,
+            }
+        }
+        (Value::String(handle), Some(base)) => {
+            let bytes = vm.heap.string_bytes(handle).ok_or_else(|| {
+                KError::new(
+                    KErrorKind::Runtime("invalid string handle".to_owned()),
+                    None,
+                )
+            })?;
+            match std::str::from_utf8(bytes) {
+                Ok(text) => i64::from_str_radix(text.trim(), base)
+                    .ok()
+                    .map(Value::integer),
+                Err(_) => None,
+            }
+        }
+        _ => None,
+    };
+
+    Ok(vec![result.unwrap_or(Value::nil())])
+}
+
+pub fn native_pcall(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let Some((&callee, rest)) = args.split_first() else {
+        return Err(KError::new(
+            KErrorKind::Runtime("pcall expects a function".to_owned()),
+            None,
+        ));
+    };
+    match vm.call_value_multi(callee, rest.to_vec()) {
+        Ok(values) => {
+            let mut out = Vec::with_capacity(values.len() + 1);
+            out.push(Value::boolean(true));
+            out.extend(values);
+            Ok(out)
+        }
+        Err(error) => {
+            let message = vm.heap.intern_string(error.to_string().into_bytes())?;
+            Ok(vec![Value::boolean(false), Value::string(message)])
+        }
+    }
+}
+
+pub fn native_xpcall(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let Some((&callee, rest)) = args.split_first() else {
+        return Err(KError::new(
+            KErrorKind::Runtime("xpcall expects a function".to_owned()),
+            None,
+        ));
+    };
+    let Some((&handler, call_args)) = rest.split_first() else {
+        return Err(KError::new(
+            KErrorKind::Runtime("xpcall expects an error handler".to_owned()),
+            None,
+        ));
+    };
+    match vm.call_value_multi(callee, call_args.to_vec()) {
+        Ok(values) => {
+            let mut out = Vec::with_capacity(values.len() + 1);
+            out.push(Value::boolean(true));
+            out.extend(values);
+            Ok(out)
+        }
+        Err(error) => {
+            let message = vm.heap.intern_string(error.to_string().into_bytes())?;
+            let handler_result = vm.call_value_multi(handler, vec![Value::string(message)])?;
+            let mut out = Vec::with_capacity(handler_result.len() + 1);
+            out.push(Value::boolean(false));
+            out.extend(handler_result);
+            Ok(out)
+        }
+    }
+}
+
+pub fn native_load(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let source = match args.first().copied().unwrap_or(Value::nil()) {
+        Value::String(handle) => {
+            let bytes = vm.heap.string_bytes(handle).ok_or_else(|| {
+                KError::new(
+                    KErrorKind::Runtime("invalid string handle".to_owned()),
+                    None,
+                )
+            })?;
+            bytes.to_vec()
+        }
+        _ => {
+            return Err(KError::new(
+                KErrorKind::Runtime("load currently supports string chunks only".to_owned()),
+                None,
+            ));
+        }
+    };
+
+    let mode = args.get(2).and_then(|value| match value {
+        Value::String(handle) => vm
+            .heap
+            .string_bytes(*handle)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .map(|text| text.to_owned()),
+        _ => None,
+    });
+    let env = args.get(3).copied();
+    let closure = vm.load_chunk_bytes(&source, mode.as_deref(), env)?;
+    Ok(vec![Value::closure(closure)])
+}
+
+pub fn native_loadfile(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let path = match args.first().copied().unwrap_or(Value::nil()) {
+        Value::String(handle) => {
+            let bytes = vm.heap.string_bytes(handle).ok_or_else(|| {
+                KError::new(
+                    KErrorKind::Runtime("invalid string handle".to_owned()),
+                    None,
+                )
+            })?;
+            String::from_utf8_lossy(bytes).into_owned()
+        }
+        Value::Nil => {
+            return Err(KError::new(
+                KErrorKind::Runtime("loadfile expects a file path".to_owned()),
+                None,
+            ));
+        }
+        other => {
+            return Err(KError::new(
+                KErrorKind::Runtime(format!(
+                    "loadfile expects a string path, got {}",
+                    vm.value_type_name(other)
+                )),
+                None,
+            ));
+        }
+    };
+    let bytes = fs::read(&path)?;
+    let mode = args.get(1).and_then(|value| match value {
+        Value::String(handle) => vm
+            .heap
+            .string_bytes(*handle)
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .map(|text| text.to_owned()),
+        _ => None,
+    });
+    let env = args.get(2).copied();
+    let closure = vm.load_chunk_bytes(&bytes, mode.as_deref(), env)?;
+    Ok(vec![Value::closure(closure)])
+}
+
+pub fn native_dofile(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let path = match args.first().copied().unwrap_or(Value::nil()) {
+        Value::String(handle) => {
+            let bytes = vm.heap.string_bytes(handle).ok_or_else(|| {
+                KError::new(
+                    KErrorKind::Runtime("invalid string handle".to_owned()),
+                    None,
+                )
+            })?;
+            String::from_utf8_lossy(bytes).into_owned()
+        }
+        _ => {
+            return Err(KError::new(
+                KErrorKind::Runtime("dofile expects a file path".to_owned()),
+                None,
+            ));
+        }
+    };
+    let bytes = fs::read(&path)?;
+    let closure = vm.load_chunk_bytes(&bytes, None, None)?;
+    vm.call_value_multi(Value::closure(closure), Vec::new())
+}
+
+pub fn native_warn(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let mut text = String::new();
+    for (index, value) in args.iter().enumerate() {
+        if index > 0 {
+            text.push('\t');
+        }
+        text.push_str(&vm.format_value(*value)?);
+    }
+    if text == "@off" {
+        vm.warn_enabled = false;
+        return Ok(Vec::new());
+    }
+    if text == "@on" {
+        vm.warn_enabled = true;
+        return Ok(Vec::new());
+    }
+    if vm.warn_enabled {
+        eprintln!("{text}");
+    }
+    Ok(Vec::new())
+}
+
+pub fn native_next(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let table = match args.first().copied().unwrap_or(Value::nil()) {
+        Value::Table(handle) => handle,
+        other => {
+            return Err(KError::new(
+                KErrorKind::Runtime(format!(
+                    "next expects a table, got {}",
+                    vm.value_type_name(other)
+                )),
+                None,
+            ));
+        }
+    };
+    let key = args.get(1).copied();
+    let table = vm.heap.resolve_table(table)?;
+    Ok(match table.next_key(key) {
+        Some((next_key, value)) => vec![next_key, value],
+        None => Vec::new(),
+    })
+}
+
+pub fn native_pairs(_vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let table = args.first().copied().unwrap_or(Value::nil());
+    Ok(vec![Value::native(native_next), table, Value::nil()])
+}
+
+pub fn native_ipairs(_vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let table = args.first().copied().unwrap_or(Value::nil());
+    Ok(vec![
+        Value::native(native_ipairs_next),
+        table,
+        Value::integer(0),
+    ])
+}
+
+pub fn native_ipairs_next(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let table = match args.first().copied().unwrap_or(Value::nil()) {
+        Value::Table(handle) => handle,
+        _ => return Ok(Vec::new()),
+    };
+    let index = match args.get(1).copied().unwrap_or(Value::integer(0)) {
+        Value::Integer(value) if value >= 0 => value,
+        _ => 0,
+    };
+    let next_index = index.saturating_add(1);
+    let table = vm.heap.resolve_table(table)?;
+    let value = table.raw_get(Value::integer(next_index))?;
+    if matches!(value, Value::Nil) {
+        return Ok(Vec::new());
+    }
+    Ok(vec![Value::integer(next_index), value])
+}
+
+macro_rules! stub_native {
+    ($($name:ident),+ $(,)?) => {
+        $(
+            pub fn $name(_vm: &mut Vm, _args: &[Value]) -> KResult<Vec<Value>> {
+                Err(KError::new(
+                    KErrorKind::Runtime(concat!(stringify!($name), " is not yet implemented").to_owned()),
+                    None,
+                ))
+            }
+        )+
+    };
+}
+
+pub fn native_string_dump(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let closure = match args.first().copied().unwrap_or(Value::nil()) {
+        Value::Closure(handle) => handle,
+        other => {
+            return Err(KError::new(
+                KErrorKind::Runtime(format!(
+                    "string.dump expects a Lua function, got {}",
+                    vm.value_type_name(other)
+                )),
+                None,
+            ));
+        }
+    };
+    let proto = &vm.heap.resolve_closure(closure)?.proto;
+    let mut bytes = b"KUUBIN\0".to_vec();
+    bytes.extend(proto.encode()?);
+    let handle = vm.heap.intern_string(bytes)?;
+    Ok(vec![Value::string(handle)])
+}
+
+pub fn native_string_find(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let text = string_text(vm, args)?;
+    let pattern = match args.get(1).copied().unwrap_or(Value::nil()) {
+        Value::String(handle) => vm
+            .heap
+            .string_bytes(handle)
+            .ok_or_else(|| {
+                KError::new(
+                    KErrorKind::Runtime("invalid string handle".to_owned()),
+                    None,
+                )
+            })?
+            .to_vec(),
+        _ => {
+            return Err(KError::new(
+                KErrorKind::Runtime("string expected".to_owned()),
+                None,
+            ));
+        }
+    };
+    let plain = matches!(args.get(3).copied(), Some(Value::Boolean(true)));
+    let start = match args.get(2).copied().unwrap_or(Value::integer(1)) {
+        Value::Integer(value) => value,
+        _ => {
+            return Err(KError::new(
+                KErrorKind::Runtime("integer expected".to_owned()),
+                None,
+            ));
+        }
+    };
+    let start_index = normalize_lua_index(start, i64::try_from(text.len()).unwrap_or(i64::MAX), 1);
+    let start_index = usize::try_from(start_index.saturating_sub(1)).unwrap_or(0);
+    let haystack = text.as_bytes();
+    if pattern.is_empty() {
+        let pos = i64::try_from(start_index + 1)
+            .map_err(|_| KError::new(KErrorKind::Runtime("position overflow".to_owned()), None))?;
+        return Ok(vec![Value::integer(pos), Value::integer(pos - 1)]);
+    }
+    let needle = pattern;
+    let haystack = haystack.get(start_index..).unwrap_or(&[]);
+    let search = if plain {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle.as_slice())
+    } else {
+        haystack
+            .windows(needle.len())
+            .position(|window| window == needle.as_slice())
+    };
+    if let Some(pos) = search {
+        let first = start_index + pos + 1;
+        let last = first + needle.len() - 1;
+        Ok(vec![
+            Value::integer(i64::try_from(first).map_err(|_| {
+                KError::new(KErrorKind::Runtime("position overflow".to_owned()), None)
+            })?),
+            Value::integer(i64::try_from(last).map_err(|_| {
+                KError::new(KErrorKind::Runtime("position overflow".to_owned()), None)
+            })?),
+        ])
+    } else {
+        Ok(vec![Value::nil()])
+    }
+}
+
+pub fn native_string_match(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let text = string_text(vm, args)?;
+    let pattern = match args.get(1).copied().unwrap_or(Value::nil()) {
+        Value::String(handle) => vm
+            .heap
+            .string_bytes(handle)
+            .ok_or_else(|| {
+                KError::new(
+                    KErrorKind::Runtime("invalid string handle".to_owned()),
+                    None,
+                )
+            })?
+            .to_vec(),
+        _ => {
+            return Err(KError::new(
+                KErrorKind::Runtime("string expected".to_owned()),
+                None,
+            ));
+        }
+    };
+    let start = match args.get(2).copied().unwrap_or(Value::integer(1)) {
+        Value::Integer(value) => value,
+        _ => {
+            return Err(KError::new(
+                KErrorKind::Runtime("integer expected".to_owned()),
+                None,
+            ));
+        }
+    };
+    let start_index = normalize_lua_index(start, i64::try_from(text.len()).unwrap_or(i64::MAX), 1);
+    let start_index = usize::try_from(start_index.saturating_sub(1)).unwrap_or(0);
+    let haystack = text.as_bytes();
+    let haystack = haystack.get(start_index..).unwrap_or(&[]);
+    if haystack.starts_with(&pattern) {
+        let matched = haystack.get(..pattern.len()).unwrap_or(&[]);
+        let handle = vm.heap.intern_string(matched.to_vec())?;
+        Ok(vec![Value::string(handle)])
+    } else {
+        Ok(Vec::new())
+    }
+}
+
+pub fn native_string_gsub(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let text = string_text(vm, args)?;
+    let pattern = match args.get(1).copied().unwrap_or(Value::nil()) {
+        Value::String(handle) => vm
+            .heap
+            .string_bytes(handle)
+            .ok_or_else(|| {
+                KError::new(
+                    KErrorKind::Runtime("invalid string handle".to_owned()),
+                    None,
+                )
+            })?
+            .to_vec(),
+        _ => {
+            return Err(KError::new(
+                KErrorKind::Runtime("string expected".to_owned()),
+                None,
+            ));
+        }
+    };
+    let replacement = args.get(2).copied().unwrap_or(Value::nil());
+    let limit = match args.get(3).copied() {
+        Some(Value::Integer(value)) if value >= 0 => usize::try_from(value).unwrap_or(usize::MAX),
+        Some(Value::Nil) | None => usize::MAX,
+        Some(_) => {
+            return Err(KError::new(
+                KErrorKind::Runtime("integer expected".to_owned()),
+                None,
+            ));
+        }
+    };
+    let mut remaining = text.as_str();
+    let mut out = String::new();
+    let mut count = 0usize;
+    while count < limit {
+        let Some(pos) = remaining
+            .as_bytes()
+            .windows(pattern.len())
+            .position(|window| window == pattern.as_slice())
+        else {
+            break;
+        };
+        out.push_str(&remaining[..pos]);
+        let replacement_text = match replacement {
+            Value::String(handle) => vm.heap.string_bytes(handle).map_or_else(
+                || {
+                    Err(KError::new(
+                        KErrorKind::Runtime("invalid string handle".to_owned()),
+                        None,
+                    ))
+                },
+                |bytes| Ok(String::from_utf8_lossy(bytes).into_owned()),
+            )?,
+            Value::Nil => String::new(),
+            other => vm.format_value(other)?,
+        };
+        out.push_str(&replacement_text);
+        remaining = &remaining[pos + pattern.len()..];
+        count = count.saturating_add(1);
+    }
+    out.push_str(remaining);
+    let handle = vm.heap.intern_string(out.into_bytes())?;
+    Ok(vec![
+        Value::string(handle),
+        Value::integer(i64::try_from(count).map_err(|_| {
+            KError::new(
+                KErrorKind::Runtime("replacement count overflow".to_owned()),
+                None,
+            )
+        })?),
+    ])
+}
+
+pub fn native_string_len(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let value = args.first().copied().unwrap_or(Value::nil());
+    let bytes = match value {
+        Value::String(handle) => vm.heap.string_bytes(handle).ok_or_else(|| {
+            KError::new(
+                KErrorKind::Runtime("invalid string handle".to_owned()),
+                None,
+            )
+        })?,
+        _ => {
+            return Err(KError::new(
+                KErrorKind::Runtime("string.len expects a string".to_owned()),
+                None,
+            ));
+        }
+    };
+    Ok(vec![Value::integer(i64::try_from(bytes.len()).map_err(
+        |_| {
+            KError::new(
+                KErrorKind::Runtime("string length overflow".to_owned()),
+                None,
+            )
+        },
+    )?)])
+}
+
+pub fn native_string_sub(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let string = match args.first().copied().unwrap_or(Value::nil()) {
+        Value::String(handle) => handle,
+        other => {
+            return Err(KError::new(
+                KErrorKind::Runtime(format!(
+                    "string.sub expects a string, got {}",
+                    vm.value_type_name(other)
+                )),
+                None,
+            ));
+        }
+    };
+    let bytes = vm.heap.string_bytes(string).ok_or_else(|| {
+        KError::new(
+            KErrorKind::Runtime("invalid string handle".to_owned()),
+            None,
+        )
+    })?;
+    let len = i64::try_from(bytes.len()).map_err(|_| {
+        KError::new(
+            KErrorKind::Runtime("string length overflow".to_owned()),
+            None,
+        )
+    })?;
+    let start = match args.get(1).copied().unwrap_or(Value::integer(1)) {
+        Value::Integer(value) => normalize_lua_index(value, len, 1),
+        _ => 1,
+    };
+    let end = match args.get(2).copied() {
+        Some(Value::Integer(value)) => normalize_lua_index(value, len, len),
+        _ => len,
+    };
+    if start > end || start > len {
+        let handle = vm.heap.intern_string(Vec::new())?;
+        return Ok(vec![Value::string(handle)]);
+    }
+    let start = usize::try_from(start.saturating_sub(1)).unwrap_or(0);
+    let end = usize::try_from(end.min(len)).unwrap_or(bytes.len());
+    let slice = bytes.get(start..end).unwrap_or(&[]);
+    let handle = vm.heap.intern_string(slice.to_vec())?;
+    Ok(vec![Value::string(handle)])
+}
+
+pub fn native_string_byte(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let string = match args.first().copied().unwrap_or(Value::nil()) {
+        Value::String(handle) => handle,
+        _ => return Ok(Vec::new()),
+    };
+    let bytes = vm.heap.string_bytes(string).ok_or_else(|| {
+        KError::new(
+            KErrorKind::Runtime("invalid string handle".to_owned()),
+            None,
+        )
+    })?;
+    let start = match args.get(1).copied() {
+        Some(Value::Integer(value)) if value >= 1 => value,
+        _ => 1,
+    };
+    let end = match args.get(2).copied() {
+        Some(Value::Integer(value)) if value >= start => value,
+        _ => start,
+    };
+    let mut out = Vec::new();
+    for index in start..=end {
+        let slot = match usize::try_from(index - 1) {
+            Ok(value) => value,
+            Err(_) => continue,
+        };
+        if let Some(byte) = bytes.get(slot).copied() {
+            out.push(Value::integer(i64::from(byte)));
+        }
+    }
+    Ok(out)
+}
+
+pub fn native_string_char(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let mut bytes = Vec::new();
+    for value in args {
+        let integer = match value {
+            Value::Integer(value) if (0..=255).contains(value) => *value as u8,
+            Value::Number(value) if value.fract() == 0.0 && (0.0..=255.0).contains(value) => {
+                *value as u8
+            }
+            other => {
+                return Err(KError::new(
+                    KErrorKind::Runtime(format!(
+                        "string.char expects byte values, got {}",
+                        vm.value_type_name(*other)
+                    )),
+                    None,
+                ));
+            }
+        };
+        bytes.push(integer);
+    }
+    let handle = vm.heap.intern_string(bytes)?;
+    Ok(vec![Value::string(handle)])
+}
+
+pub fn native_string_rep(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let value = args.first().copied().unwrap_or(Value::nil());
+    let times = match args.get(1).copied().unwrap_or(Value::integer(1)) {
+        Value::Integer(value) if value >= 0 => usize::try_from(value).unwrap_or(0),
+        _ => {
+            return Err(KError::new(
+                KErrorKind::Runtime("string.rep expects a non-negative integer count".to_owned()),
+                None,
+            ));
+        }
+    };
+    let sep = match args.get(2).copied() {
+        Some(Value::String(handle)) => vm.heap.string_bytes(handle).unwrap_or(&[]).to_vec(),
+        _ => Vec::new(),
+    };
+    let piece = match value {
+        Value::String(handle) => vm.heap.string_bytes(handle).unwrap_or(&[]).to_vec(),
+        other => vm.format_value(other)?.into_bytes(),
+    };
+    let mut bytes = Vec::new();
+    for index in 0..times {
+        if index > 0 {
+            bytes.extend_from_slice(&sep);
+        }
+        bytes.extend_from_slice(&piece);
+    }
+    let handle = vm.heap.intern_string(bytes)?;
+    Ok(vec![Value::string(handle)])
+}
+
+pub fn native_string_lower(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    string_case(vm, args, |text| text.to_ascii_lowercase())
+}
+
+pub fn native_string_upper(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    string_case(vm, args, |text| text.to_ascii_uppercase())
+}
+
+pub fn native_string_reverse(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let text = string_text(vm, args)?;
+    let mut bytes = text.into_bytes();
+    bytes.reverse();
+    let handle = vm.heap.intern_string(bytes)?;
+    Ok(vec![Value::string(handle)])
+}
+
+pub fn native_string_format(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let fmt = string_text(vm, args)?;
+    let mut out = String::new();
+    let bytes = fmt.as_bytes();
+    let mut index = 0usize;
+    let mut arg_index = 1usize;
+    while let Some(&byte) = bytes.get(index) {
+        if byte != b'%' {
+            out.push(char::from(byte));
+            index = index.saturating_add(1);
+            continue;
+        }
+        index = index.saturating_add(1);
+        let Some(&next) = bytes.get(index) else {
+            return Err(KError::new(
+                KErrorKind::Runtime("invalid format string".to_owned()),
+                None,
+            ));
+        };
+        if next == b'%' {
+            out.push('%');
+            index = index.saturating_add(1);
+            continue;
+        }
+
+        let mut left_align = false;
+        let mut zero_pad = false;
+        loop {
+            match bytes.get(index).copied() {
+                Some(b'-') => {
+                    left_align = true;
+                    index = index.saturating_add(1);
+                }
+                Some(b'0') => {
+                    zero_pad = true;
+                    index = index.saturating_add(1);
+                }
+                Some(b'+') | Some(b' ') | Some(b'#') => {
+                    index = index.saturating_add(1);
+                }
+                _ => break,
+            }
+        }
+
+        let mut width = 0usize;
+        let mut has_width = false;
+        while let Some(&digit) = bytes.get(index) {
+            if digit.is_ascii_digit() {
+                has_width = true;
+                width = width
+                    .saturating_mul(10)
+                    .saturating_add(usize::from(digit - b'0'));
+                index = index.saturating_add(1);
+            } else {
+                break;
+            }
+        }
+
+        let mut precision = None;
+        if matches!(bytes.get(index), Some(b'.')) {
+            index = index.saturating_add(1);
+            let mut value = 0usize;
+            let mut seen = false;
+            while let Some(&digit) = bytes.get(index) {
+                if digit.is_ascii_digit() {
+                    seen = true;
+                    value = value
+                        .saturating_mul(10)
+                        .saturating_add(usize::from(digit - b'0'));
+                    index = index.saturating_add(1);
+                } else {
+                    break;
+                }
+            }
+            precision = Some(if seen { value } else { 0 });
+        }
+
+        while matches!(
+            bytes.get(index).copied(),
+            Some(b'h' | b'l' | b'L' | b'z' | b'j' | b't')
+        ) {
+            index = index.saturating_add(1);
+        }
+
+        let Some(spec) = bytes.get(index).copied() else {
+            return Err(KError::new(
+                KErrorKind::Runtime("invalid format string".to_owned()),
+                None,
+            ));
+        };
+        index = index.saturating_add(1);
+
+        let value = args
+            .get(arg_index)
+            .copied()
+            .ok_or_else(|| KError::new(KErrorKind::Runtime("value expected".to_owned()), None))?;
+        arg_index = arg_index.saturating_add(1);
+
+        let formatted = match spec {
+            b's' => {
+                let mut text = match value {
+                    Value::String(handle) => vm
+                        .heap
+                        .string_bytes(handle)
+                        .ok_or_else(|| {
+                            KError::new(
+                                KErrorKind::Runtime("invalid string handle".to_owned()),
+                                None,
+                            )
+                        })
+                        .map(|bytes| String::from_utf8_lossy(bytes).into_owned())?,
+                    other => vm.format_value(other)?,
+                };
+                if let Some(limit) = precision {
+                    text = text.chars().take(limit).collect();
+                }
+                if has_width && text.len() < width {
+                    let pad = width - text.len();
+                    if left_align {
+                        text.push_str(&" ".repeat(pad));
+                    } else {
+                        let fill = if zero_pad { '0' } else { ' ' };
+                        text = format!("{}{}", fill.to_string().repeat(pad), text);
+                    }
+                }
+                text
+            }
+            b'd' | b'i' => {
+                let integer = vm.value_to_integer(value)?.ok_or_else(|| {
+                    KError::new(KErrorKind::Runtime("integer expected".to_owned()), None)
+                })?;
+                let mut text = integer.to_string();
+                if has_width && text.len() < width {
+                    let pad = width - text.len();
+                    if left_align {
+                        text.push_str(&" ".repeat(pad));
+                    } else {
+                        let fill = if zero_pad { '0' } else { ' ' };
+                        text = format!("{}{}", fill.to_string().repeat(pad), text);
+                    }
+                }
+                text
+            }
+            b'f' => {
+                let number = vm.value_to_number(value)?;
+                match precision {
+                    Some(precision) => format!("{number:.precision$}"),
+                    None => number.to_string(),
+                }
+            }
+            b'e' => {
+                let number = vm.value_to_number(value)?;
+                match precision {
+                    Some(precision) => format!("{number:.precision$e}"),
+                    None => format!("{number:e}"),
+                }
+            }
+            b'g' | b'G' => {
+                let number = vm.value_to_number(value)?;
+                match precision {
+                    Some(precision) => format!("{number:.precision$}"),
+                    None => number.to_string(),
+                }
+            }
+            b'q' => quote_lua_string(vm, value)?,
+            b'c' => {
+                let integer = vm.value_to_integer(value)?.ok_or_else(|| {
+                    KError::new(KErrorKind::Runtime("integer expected".to_owned()), None)
+                })?;
+                let byte = u8::try_from(integer).map_err(|_| {
+                    KError::new(KErrorKind::Runtime("byte expected".to_owned()), None)
+                })?;
+                char::from(byte).to_string()
+            }
+            other => {
+                return Err(KError::new(
+                    KErrorKind::Runtime(format!("invalid format option '{}'", char::from(other))),
+                    None,
+                ));
+            }
+        };
+        out.push_str(&formatted);
+    }
+    let handle = vm.heap.intern_string(out.into_bytes())?;
+    Ok(vec![Value::string(handle)])
+}
+
+fn math_number_value(vm: &Vm, value: Value) -> KResult<f64> {
+    vm.value_to_number(value)
+}
+
+fn math_integer_value(vm: &Vm, value: Value) -> KResult<Option<i64>> {
+    vm.value_to_integer(value)
+}
+
+fn math_return_int_or_float(vm: &Vm, value: f64) -> KResult<Value> {
+    if let Some(integer) = vm.value_to_integer(Value::number(value))? {
+        Ok(Value::integer(integer))
+    } else {
+        Ok(Value::number(value))
+    }
+}
+
+pub fn native_math_abs(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let value = args.first().copied().unwrap_or(Value::nil());
+    if let Some(integer) = math_integer_value(vm, value)? {
+        let abs = if integer < 0 {
+            0u64.wrapping_sub(integer as u64) as i64
+        } else {
+            integer
+        };
+        return Ok(vec![Value::integer(abs)]);
+    }
+    let value = math_number_value(vm, value)?.abs();
+    Ok(vec![Value::number(value)])
+}
+
+pub fn native_math_ceil(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let value = math_number_value(vm, args.first().copied().unwrap_or(Value::nil()))?;
+    if !value.is_finite() {
+        return Ok(vec![Value::number(value)]);
+    }
+    let result = value.ceil();
+    Ok(vec![math_return_int_or_float(vm, result)?])
+}
+
+pub fn native_math_floor(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let value = math_number_value(vm, args.first().copied().unwrap_or(Value::nil()))?;
+    if !value.is_finite() {
+        return Ok(vec![Value::number(value)]);
+    }
+    let result = value.floor();
+    Ok(vec![math_return_int_or_float(vm, result)?])
+}
+
+pub fn native_math_max(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let Some((&first, rest)) = args.split_first() else {
+        return Err(KError::new(
+            KErrorKind::Runtime("value expected".to_owned()),
+            None,
+        ));
+    };
+    let mut current = first;
+    for &value in rest {
+        current = if let Some(ordering) = vm.compare_values(current, value)? {
+            if matches!(ordering, std::cmp::Ordering::Less) {
+                value
+            } else {
+                current
+            }
+        } else {
+            return Err(KError::new(
+                KErrorKind::Runtime("value expected".to_owned()),
+                None,
+            ));
+        };
+    }
+    Ok(vec![current])
+}
+
+pub fn native_math_min(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let Some((&first, rest)) = args.split_first() else {
+        return Err(KError::new(
+            KErrorKind::Runtime("value expected".to_owned()),
+            None,
+        ));
+    };
+    let mut current = first;
+    for &value in rest {
+        current = if let Some(ordering) = vm.compare_values(current, value)? {
+            if matches!(ordering, std::cmp::Ordering::Greater) {
+                value
+            } else {
+                current
+            }
+        } else {
+            return Err(KError::new(
+                KErrorKind::Runtime("value expected".to_owned()),
+                None,
+            ));
+        };
+    }
+    Ok(vec![current])
+}
+
+pub fn native_math_random(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let rv = vm.math_next_u64();
+    match args.len() {
+        0 => Ok(vec![Value::number(vm.math_next_f64())]),
+        1 => {
+            let upper = math_integer_value(vm, args.first().copied().unwrap_or(Value::nil()))?
+                .ok_or_else(|| {
+                    KError::new(KErrorKind::Runtime("integer expected".to_owned()), None)
+                })?;
+            if upper == 0 {
+                return Ok(vec![Value::integer(i64::from_ne_bytes(rv.to_ne_bytes()))]);
+            }
+            if upper < 0 {
+                return Err(KError::new(
+                    KErrorKind::Runtime("interval is empty".to_owned()),
+                    None,
+                ));
+            }
+            let result = vm.math_random_integer(1, i128::from(upper))?;
+            Ok(vec![Value::integer(i64::try_from(result).map_err(
+                |_| {
+                    KError::new(
+                        KErrorKind::Runtime("random result overflow".to_owned()),
+                        None,
+                    )
+                },
+            )?)])
+        }
+        2 => {
+            let low = math_integer_value(vm, args.first().copied().unwrap_or(Value::nil()))?
+                .ok_or_else(|| {
+                    KError::new(KErrorKind::Runtime("integer expected".to_owned()), None)
+                })?;
+            let high = math_integer_value(vm, args.get(1).copied().unwrap_or(Value::nil()))?
+                .ok_or_else(|| {
+                    KError::new(KErrorKind::Runtime("integer expected".to_owned()), None)
+                })?;
+            if low > high {
+                return Err(KError::new(
+                    KErrorKind::Runtime("interval is empty".to_owned()),
+                    None,
+                ));
+            }
+            let result = vm.math_random_integer(i128::from(low), i128::from(high))?;
+            Ok(vec![Value::integer(i64::try_from(result).map_err(
+                |_| {
+                    KError::new(
+                        KErrorKind::Runtime("random result overflow".to_owned()),
+                        None,
+                    )
+                },
+            )?)])
+        }
+        _ => Err(KError::new(
+            KErrorKind::Runtime("wrong number of arguments".to_owned()),
+            None,
+        )),
+    }
+}
+
+pub fn native_math_randomseed(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    if args.is_empty() {
+        let seed1 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| {
+                KError::new(
+                    KErrorKind::Runtime("system time before UNIX_EPOCH".to_owned()),
+                    None,
+                )
+            })?
+            .as_secs();
+        let seed2 = (vm as *const Vm as usize) as u64;
+        vm.math_seed_rng(seed1, seed2);
+        return Ok(vec![
+            Value::integer(i64::from_ne_bytes(seed1.to_ne_bytes())),
+            Value::integer(i64::from_ne_bytes(seed2.to_ne_bytes())),
+        ]);
+    }
+    let seed_x = match args.first().copied().unwrap_or(Value::nil()) {
+        Value::Integer(value) => u64::from_ne_bytes(value.to_ne_bytes()),
+        Value::Number(value) if value.fract() == 0.0 => {
+            u64::from_ne_bytes((value as i64).to_ne_bytes())
+        }
+        _ => {
+            return Err(KError::new(
+                KErrorKind::Runtime("integer expected".to_owned()),
+                None,
+            ));
+        }
+    };
+    let seed_y = match args.get(1).copied() {
+        Some(Value::Integer(value)) => u64::from_ne_bytes(value.to_ne_bytes()),
+        Some(Value::Number(value)) if value.fract() == 0.0 => {
+            u64::from_ne_bytes((value as i64).to_ne_bytes())
+        }
+        Some(_) => {
+            return Err(KError::new(
+                KErrorKind::Runtime("integer expected".to_owned()),
+                None,
+            ));
+        }
+        None => 0,
+    };
+    vm.math_seed_rng(seed_x, seed_y);
+    Ok(vec![
+        Value::integer(i64::from_ne_bytes(seed_x.to_ne_bytes())),
+        Value::integer(i64::from_ne_bytes(seed_y.to_ne_bytes())),
+    ])
+}
+
+pub fn native_math_tointeger(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    Ok(
+        match math_integer_value(vm, args.first().copied().unwrap_or(Value::nil()))? {
+            Some(value) => vec![Value::integer(value)],
+            None => vec![Value::nil()],
+        },
+    )
+}
+
+pub fn native_math_type(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let result = match args.first().copied().unwrap_or(Value::nil()) {
+        Value::Integer(_) => Some("integer"),
+        Value::Number(_) => Some("float"),
+        _ => None,
+    };
+    Ok(match result {
+        Some(text) => vec![Value::string(
+            vm.heap.intern_string(text.as_bytes().to_vec())?,
+        )],
+        None => vec![Value::nil()],
+    })
+}
+
+pub fn native_math_modf(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let value = math_number_value(vm, args.first().copied().unwrap_or(Value::nil()))?;
+    if value.is_nan() {
+        return Ok(vec![Value::number(f64::NAN), Value::number(f64::NAN)]);
+    }
+    if value.is_infinite() {
+        return Ok(vec![Value::number(value), Value::number(0.0)]);
+    }
+    let integral = value.trunc();
+    let fractional = value - integral;
+    let int_value = math_return_int_or_float(vm, integral)?;
+    Ok(vec![int_value, Value::number(fractional)])
+}
+
+pub fn native_math_deg(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let value = math_number_value(vm, args.first().copied().unwrap_or(Value::nil()))?;
+    Ok(vec![Value::number(value * (180.0 / std::f64::consts::PI))])
+}
+
+pub fn native_math_rad(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let value = math_number_value(vm, args.first().copied().unwrap_or(Value::nil()))?;
+    Ok(vec![Value::number(value * (std::f64::consts::PI / 180.0))])
+}
+
+pub fn native_math_sqrt(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let value = math_number_value(vm, args.first().copied().unwrap_or(Value::nil()))?;
+    Ok(vec![Value::number(value.sqrt())])
+}
+
+pub fn native_math_sin(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    Ok(vec![Value::number(
+        math_number_value(vm, args.first().copied().unwrap_or(Value::nil()))?.sin(),
+    )])
+}
+
+pub fn native_math_cos(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    Ok(vec![Value::number(
+        math_number_value(vm, args.first().copied().unwrap_or(Value::nil()))?.cos(),
+    )])
+}
+
+pub fn native_math_tan(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    Ok(vec![Value::number(
+        math_number_value(vm, args.first().copied().unwrap_or(Value::nil()))?.tan(),
+    )])
+}
+
+pub fn native_math_asin(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    Ok(vec![Value::number(
+        math_number_value(vm, args.first().copied().unwrap_or(Value::nil()))?.asin(),
+    )])
+}
+
+pub fn native_math_acos(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    Ok(vec![Value::number(
+        math_number_value(vm, args.first().copied().unwrap_or(Value::nil()))?.acos(),
+    )])
+}
+
+pub fn native_math_atan(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let y = math_number_value(vm, args.first().copied().unwrap_or(Value::nil()))?;
+    let value = match args.get(1).copied() {
+        Some(x) => y.atan2(math_number_value(vm, x)?),
+        None => y.atan(),
+    };
+    Ok(vec![Value::number(value)])
+}
+
+pub fn native_math_exp(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    Ok(vec![Value::number(
+        math_number_value(vm, args.first().copied().unwrap_or(Value::nil()))?.exp(),
+    )])
+}
+
+pub fn native_math_log(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let value = math_number_value(vm, args.first().copied().unwrap_or(Value::nil()))?;
+    let result = match args.get(1).copied() {
+        Some(base) => value.log(math_number_value(vm, base)?),
+        None => value.ln(),
+    };
+    Ok(vec![Value::number(result)])
+}
+
+pub fn native_math_fmod(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let left = args.first().copied().unwrap_or(Value::nil());
+    let right = args.get(1).copied().unwrap_or(Value::nil());
+    if let (Some(left), Some(right)) = (
+        math_integer_value(vm, left)?,
+        math_integer_value(vm, right)?,
+    ) {
+        let divisor = right;
+        if divisor == 0 {
+            return Err(KError::new(KErrorKind::Runtime("zero".to_owned()), None));
+        }
+        if divisor == -1 {
+            return Ok(vec![Value::integer(0)]);
+        }
+        return Ok(vec![Value::integer(left % divisor)]);
+    }
+    let left = math_number_value(vm, left)?;
+    let right = math_number_value(vm, right)?;
+    Ok(vec![Value::number(left % right)])
+}
+
+pub fn native_math_ldexp(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let value = math_number_value(vm, args.first().copied().unwrap_or(Value::nil()))?;
+    let exp = math_integer_value(vm, args.get(1).copied().unwrap_or(Value::nil()))?
+        .ok_or_else(|| KError::new(KErrorKind::Runtime("integer expected".to_owned()), None))?;
+    Ok(vec![Value::number(value * 2f64.powi(exp as i32))])
+}
+
+pub fn native_math_frexp(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let value = math_number_value(vm, args.first().copied().unwrap_or(Value::nil()))?;
+    if value == 0.0 || !value.is_finite() {
+        return Ok(vec![Value::number(value), Value::integer(0)]);
+    }
+    let bits = value.to_bits();
+    let exponent_bits = ((bits >> 52) & 0x7ff) as i32;
+    let mantissa_bits = bits & 0x000f_ffff_ffff_ffff;
+    let (mantissa, exponent) = if exponent_bits == 0 {
+        let mut normalized = value;
+        let mut exp = 0i32;
+        while normalized.abs() < 0.5 {
+            normalized *= 2.0;
+            exp -= 1;
+        }
+        (normalized, exp)
+    } else {
+        let exp = exponent_bits - 1022;
+        let mantissa_bits = mantissa_bits | (0x3feu64 << 52);
+        (f64::from_bits(mantissa_bits), exp)
+    };
+    Ok(vec![
+        Value::number(mantissa),
+        Value::integer(i64::from(exponent)),
+    ])
+}
+
+pub fn native_math_ult(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let left = math_integer_value(vm, args.first().copied().unwrap_or(Value::nil()))?
+        .ok_or_else(|| KError::new(KErrorKind::Runtime("integer expected".to_owned()), None))?;
+    let right = math_integer_value(vm, args.get(1).copied().unwrap_or(Value::nil()))?
+        .ok_or_else(|| KError::new(KErrorKind::Runtime("integer expected".to_owned()), None))?;
+    Ok(vec![Value::boolean((left as u64) < (right as u64))])
+}
+
+pub fn native_os_clock(vm: &mut Vm, _args: &[Value]) -> KResult<Vec<Value>> {
+    Ok(vec![Value::number(
+        vm.start_instant.elapsed().as_secs_f64(),
+    )])
+}
+
+pub fn native_os_execute(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let what = vm.heap.intern_string(b"exit".to_vec())?;
+    let Some(command_value) = args.first().copied() else {
+        return Ok(vec![
+            Value::boolean(true),
+            Value::string(what),
+            Value::integer(0),
+        ]);
+    };
+    let command = string_text(vm, &[command_value])?;
+    let status = Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .status()
+        .map_err(|error| KError::new(KErrorKind::Runtime(error.to_string()), None))?;
+    let code = status.code().unwrap_or(1);
+    Ok(vec![
+        Value::boolean(status.success()),
+        Value::string(what),
+        Value::integer(i64::from(code)),
+    ])
+}
+
+pub fn native_os_difftime(_vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let t1 = match args.first().copied().unwrap_or(Value::nil()) {
+        Value::Integer(value) => value as f64,
+        Value::Number(value) => value,
+        _ => {
+            return Err(KError::new(
+                KErrorKind::Runtime("number expected".to_owned()),
+                None,
+            ));
+        }
+    };
+    let t2 = match args.get(1).copied().unwrap_or(Value::nil()) {
+        Value::Integer(value) => value as f64,
+        Value::Number(value) => value,
+        _ => {
+            return Err(KError::new(
+                KErrorKind::Runtime("number expected".to_owned()),
+                None,
+            ));
+        }
+    };
+    Ok(vec![Value::number(t1 - t2)])
+}
+
+pub fn native_os_time(_vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    if args.is_empty() || matches!(args.first(), Some(Value::Nil)) {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|_| {
+                KError::new(
+                    KErrorKind::Runtime("system time before UNIX_EPOCH".to_owned()),
+                    None,
+                )
+            })?;
+        return Ok(vec![Value::integer(i64::try_from(now.as_secs()).map_err(
+            |_| KError::new(KErrorKind::Runtime("time overflow".to_owned()), None),
+        )?)]);
+    }
+    Err(KError::new(
+        KErrorKind::Runtime("os.time table argument is not yet implemented".to_owned()),
+        None,
+    ))
+}
+
+pub fn native_os_tmpname(_vm: &mut Vm, _args: &[Value]) -> KResult<Vec<Value>> {
+    static TMPNAME_COUNTER: AtomicU64 = AtomicU64::new(0);
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|_| {
+            KError::new(
+                KErrorKind::Runtime("system time before UNIX_EPOCH".to_owned()),
+                None,
+            )
+        })?
+        .as_nanos();
+    let counter = TMPNAME_COUNTER.fetch_add(1, AtomicOrdering::Relaxed);
+    let mut path = std::env::temp_dir();
+    path.push(format!("kuu-{now}-{counter}.tmp"));
+    let handle = _vm
+        .heap
+        .intern_string(path.to_string_lossy().into_owned().into_bytes())?;
+    Ok(vec![Value::string(handle)])
+}
+
+fn os_path_result(vm: &mut Vm, result: std::io::Result<()>) -> KResult<Vec<Value>> {
+    match result {
+        Ok(()) => Ok(vec![Value::boolean(true)]),
+        Err(error) => {
+            let message = error.to_string();
+            let handle = vm.heap.intern_string(message.into_bytes())?;
+            Ok(vec![Value::nil(), Value::string(handle), Value::integer(1)])
+        }
+    }
+}
+
+pub fn native_os_remove(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let path = string_text(vm, args)?;
+    os_path_result(vm, fs::remove_file(path))
+}
+
+pub fn native_os_rename(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let source = string_text(vm, args)?;
+    let destination = match args.get(1).copied() {
+        Some(value) => string_text(vm, &[value])?,
+        None => {
+            return Err(KError::new(
+                KErrorKind::Runtime("filename expected".to_owned()),
+                None,
+            ));
+        }
+    };
+    os_path_result(vm, fs::rename(source, destination))
+}
+
+pub fn native_os_setlocale(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let locale = match args.first().copied().unwrap_or(Value::nil()) {
+        Value::Nil => vm.os_locale.clone(),
+        Value::String(handle) => {
+            let bytes = vm.heap.string_bytes(handle).ok_or_else(|| {
+                KError::new(
+                    KErrorKind::Runtime("invalid locale string handle".to_owned()),
+                    None,
+                )
+            })?;
+            let text = std::str::from_utf8(bytes).map_err(|_| {
+                KError::new(KErrorKind::Runtime("locale must be UTF-8".to_owned()), None)
+            })?;
+            if text == "C" || text == "C.UTF-8" || text.is_empty() {
+                vm.os_locale = "C".to_owned();
+                vm.os_locale.clone()
+            } else {
+                return Ok(vec![Value::nil()]);
+            }
+        }
+        _ => {
+            return Err(KError::new(
+                KErrorKind::Runtime("locale string expected".to_owned()),
+                None,
+            ));
+        }
+    };
+    Ok(vec![Value::string(
+        vm.heap.intern_string(locale.into_bytes())?,
+    )])
+}
+
+fn file_userdata_mut(vm: &mut Vm, handle: UserdataHandle) -> KResult<Rc<RefCell<UserdataObject>>> {
+    vm.resolve_userdata(handle)
+}
+
+fn file_kind_display(kind: &FileKind) -> &'static str {
+    match kind {
+        FileKind::File(_) => "file",
+        FileKind::Stdin | FileKind::Stdout | FileKind::Stderr => "file",
+        FileKind::Closed => "closed file",
+    }
+}
+
+fn file_close_handle(vm: &mut Vm, handle: UserdataHandle) -> KResult<bool> {
+    let file = file_userdata_mut(vm, handle)?;
+    let mut file = file.borrow_mut();
+    match &mut *file {
+        UserdataObject::File(entry) => match std::mem::replace(&mut entry.kind, FileKind::Closed) {
+            FileKind::File(mut file) => {
+                let _ = file.flush();
+                Ok(true)
+            }
+            FileKind::Stdin | FileKind::Stdout | FileKind::Stderr => {
+                entry.kind = FileKind::Stdin;
+                Ok(false)
+            }
+            FileKind::Closed => Ok(false),
+        },
+        _ => Ok(false),
+    }
+}
+
+fn file_write_bytes(vm: &mut Vm, handle: UserdataHandle, parts: &[Value]) -> KResult<bool> {
+    let file = file_userdata_mut(vm, handle)?;
+    let mut file = file.borrow_mut();
+    let UserdataObject::File(entry) = &mut *file else {
+        return Err(KError::new(
+            KErrorKind::Runtime("invalid file handle".to_owned()),
+            None,
+        ));
+    };
+    let FileKind::File(writer) = &mut entry.kind else {
+        return Err(KError::new(
+            KErrorKind::Runtime("closed file".to_owned()),
+            None,
+        ));
+    };
+
+    for value in parts {
+        let text = vm.format_value(*value)?;
+        writer
+            .write_all(text.as_bytes())
+            .map_err(|error| KError::new(KErrorKind::Runtime(error.to_string()), None))?;
+    }
+    Ok(true)
+}
+
+pub fn native_io_open(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let path = string_text(vm, args)?;
+    let mode = match args.get(1).copied() {
+        Some(Value::String(handle)) => {
+            let bytes = vm.heap.string_bytes(handle).ok_or_else(|| {
+                KError::new(
+                    KErrorKind::Runtime("invalid mode string handle".to_owned()),
+                    None,
+                )
+            })?;
+            String::from_utf8_lossy(bytes).into_owned()
+        }
+        None => "r".to_owned(),
+        Some(_) => {
+            return Err(KError::new(
+                KErrorKind::Runtime("invalid mode".to_owned()),
+                None,
+            ));
+        }
+    };
+
+    let mut options = std::fs::OpenOptions::new();
+    let mut read = false;
+    let mut write = false;
+    let mut append = false;
+    let mut truncate = false;
+    let mut create = false;
+    let normalized = mode.replace('b', "");
+    match normalized.as_str() {
+        "r" => {
+            read = true;
+        }
+        "w" => {
+            write = true;
+            truncate = true;
+            create = true;
+        }
+        "a" => {
+            write = true;
+            append = true;
+            create = true;
+        }
+        "r+" => {
+            read = true;
+            write = true;
+        }
+        "w+" => {
+            read = true;
+            write = true;
+            truncate = true;
+            create = true;
+        }
+        "a+" => {
+            read = true;
+            write = true;
+            append = true;
+            create = true;
+        }
+        _ => {
+            return Err(KError::new(
+                KErrorKind::Runtime("invalid mode".to_owned()),
+                None,
+            ));
+        }
+    }
+    options
+        .read(read)
+        .write(write)
+        .append(append)
+        .truncate(truncate)
+        .create(create);
+
+    let file = options
+        .open(path)
+        .map_err(|error| KError::new(KErrorKind::Runtime(error.to_string()), None))?;
+    let handle = vm.new_userdata(UserdataObject::File(FileObject {
+        kind: FileKind::File(file),
+    }))?;
+    Ok(vec![Value::userdata(handle)])
+}
+
+pub fn native_io_type(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let value = args.first().copied().unwrap_or(Value::nil());
+    let result = match value {
+        Value::Userdata(handle) => {
+            let file = vm.resolve_userdata(handle)?;
+            let file = file.borrow();
+            match &*file {
+                UserdataObject::File(entry) => Some(file_kind_display(&entry.kind)),
+                _ => None,
+            }
+        }
+        _ => None,
+    };
+    Ok(match result {
+        Some(text) => vec![Value::string(
+            vm.heap.intern_string(text.as_bytes().to_vec())?,
+        )],
+        None => vec![Value::nil()],
+    })
+}
+
+pub fn native_io_input(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    match args.first().copied() {
+        None => Ok(vec![Value::userdata(vm.current_input)]),
+        Some(Value::String(handle)) => {
+            let path = vm.heap.string_bytes(handle).ok_or_else(|| {
+                KError::new(
+                    KErrorKind::Runtime("invalid input file name".to_owned()),
+                    None,
+                )
+            })?;
+            let path = String::from_utf8_lossy(path).into_owned();
+            let file = std::fs::File::open(path)
+                .map_err(|error| KError::new(KErrorKind::Runtime(error.to_string()), None))?;
+            let handle = vm.new_userdata(UserdataObject::File(FileObject {
+                kind: FileKind::File(file),
+            }))?;
+            vm.current_input = handle;
+            Ok(vec![Value::userdata(handle)])
+        }
+        Some(Value::Userdata(handle)) => {
+            vm.current_input = handle;
+            Ok(vec![Value::userdata(handle)])
+        }
+        Some(_) => Err(KError::new(
+            KErrorKind::Runtime("invalid input file".to_owned()),
+            None,
+        )),
+    }
+}
+
+pub fn native_io_output(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    match args.first().copied() {
+        None => Ok(vec![Value::userdata(vm.current_output)]),
+        Some(Value::String(handle)) => {
+            let path = vm.heap.string_bytes(handle).ok_or_else(|| {
+                KError::new(
+                    KErrorKind::Runtime("invalid output file name".to_owned()),
+                    None,
+                )
+            })?;
+            let path = String::from_utf8_lossy(path).into_owned();
+            let file = std::fs::File::create(path)
+                .map_err(|error| KError::new(KErrorKind::Runtime(error.to_string()), None))?;
+            let handle = vm.new_userdata(UserdataObject::File(FileObject {
+                kind: FileKind::File(file),
+            }))?;
+            vm.current_output = handle;
+            Ok(vec![Value::userdata(handle)])
+        }
+        Some(Value::Userdata(handle)) => {
+            vm.current_output = handle;
+            Ok(vec![Value::userdata(handle)])
+        }
+        Some(_) => Err(KError::new(
+            KErrorKind::Runtime("invalid output file".to_owned()),
+            None,
+        )),
+    }
+}
+
+pub fn native_io_close(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let handle = match args.first().copied() {
+        Some(Value::Userdata(handle)) => handle,
+        None => vm.current_output,
+        Some(_) => {
+            return Err(KError::new(
+                KErrorKind::Runtime("file expected".to_owned()),
+                None,
+            ));
+        }
+    };
+    if file_close_handle(vm, handle)? {
+        Ok(vec![Value::boolean(true)])
+    } else {
+        Ok(vec![Value::nil()])
+    }
+}
+
+pub fn native_io_write(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let (handle, start) = match args.first().copied() {
+        Some(Value::Userdata(handle)) => (handle, 1usize),
+        _ => (vm.current_output, 0usize),
+    };
+    let tail = args.get(start..).unwrap_or(&[]);
+    let _ = file_write_bytes(vm, handle, tail)?;
+    Ok(vec![Value::userdata(handle)])
+}
+
+pub fn native_io_read(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let (handle, start) = match args.first().copied() {
+        Some(Value::Userdata(handle)) => (handle, 1usize),
+        _ => (vm.current_input, 0usize),
+    };
+    let file = file_userdata_mut(vm, handle)?;
+    let mut file = file.borrow_mut();
+    let UserdataObject::File(entry) = &mut *file else {
+        return Err(KError::new(
+            KErrorKind::Runtime("invalid file handle".to_owned()),
+            None,
+        ));
+    };
+    let FileKind::File(reader) = &mut entry.kind else {
+        return Ok(Vec::new());
+    };
+
+    let mode = args.get(start).copied();
+    let mut out = Vec::new();
+    match mode {
+        None | Some(Value::Nil) => {
+            let mut byte = [0u8; 1];
+            loop {
+                let read = reader
+                    .read(&mut byte)
+                    .map_err(|error| KError::new(KErrorKind::Runtime(error.to_string()), None))?;
+                if read == 0 || byte[0] == b'\n' {
+                    break;
+                }
+                out.push(byte[0]);
+            }
+        }
+        Some(Value::String(handle)) => {
+            let bytes = vm.heap.string_bytes(handle).ok_or_else(|| {
+                KError::new(
+                    KErrorKind::Runtime("invalid read mode handle".to_owned()),
+                    None,
+                )
+            })?;
+            let mode = String::from_utf8_lossy(bytes);
+            match mode.as_ref() {
+                "a" | "*a" => {
+                    reader.read_to_end(&mut out).map_err(|error| {
+                        KError::new(KErrorKind::Runtime(error.to_string()), None)
+                    })?;
+                }
+                "l" | "*l" => {
+                    let mut byte = [0u8; 1];
+                    loop {
+                        let read = reader.read(&mut byte).map_err(|error| {
+                            KError::new(KErrorKind::Runtime(error.to_string()), None)
+                        })?;
+                        if read == 0 || byte[0] == b'\n' {
+                            break;
+                        }
+                        if byte[0] != b'\r' {
+                            out.push(byte[0]);
+                        }
+                    }
+                }
+                "n" | "*n" => {
+                    let mut byte = [0u8; 1];
+                    let mut text = String::new();
+                    loop {
+                        let read = reader.read(&mut byte).map_err(|error| {
+                            KError::new(KErrorKind::Runtime(error.to_string()), None)
+                        })?;
+                        if read == 0 || byte[0] == b'\n' {
+                            break;
+                        }
+                        if byte[0] != b'\r' {
+                            text.push(char::from(byte[0]));
+                        }
+                    }
+                    let number = text.trim().parse::<f64>().map_err(|_| {
+                        KError::new(KErrorKind::Runtime("number expected".to_owned()), None)
+                    })?;
+                    return Ok(vec![Value::number(number)]);
+                }
+                _ => {
+                    return Err(KError::new(
+                        KErrorKind::Runtime("invalid read mode".to_owned()),
+                        None,
+                    ));
+                }
+            }
+        }
+        Some(Value::Integer(count)) if count >= 0 => {
+            let mut buffer = vec![
+                0u8;
+                usize::try_from(count).map_err(|_| {
+                    KError::new(KErrorKind::Runtime("read size overflow".to_owned()), None)
+                })?
+            ];
+            let read = reader
+                .read(&mut buffer)
+                .map_err(|error| KError::new(KErrorKind::Runtime(error.to_string()), None))?;
+            buffer.truncate(read);
+            out = buffer;
+        }
+        Some(Value::Number(count)) if count >= 0.0 && count.fract() == 0.0 => {
+            let size = usize::try_from(count as u64).map_err(|_| {
+                KError::new(KErrorKind::Runtime("read size overflow".to_owned()), None)
+            })?;
+            let mut buffer = vec![0u8; size];
+            let read = reader
+                .read(&mut buffer)
+                .map_err(|error| KError::new(KErrorKind::Runtime(error.to_string()), None))?;
+            buffer.truncate(read);
+            out = buffer;
+        }
+        Some(_) => {
+            return Err(KError::new(
+                KErrorKind::Runtime("invalid read mode".to_owned()),
+                None,
+            ));
+        }
+    }
+
+    if out.is_empty() {
+        Ok(Vec::new())
+    } else {
+        let handle = vm.heap.intern_string(out)?;
+        Ok(vec![Value::string(handle)])
+    }
+}
+
+pub fn native_io_tmpfile(vm: &mut Vm, _args: &[Value]) -> KResult<Vec<Value>> {
+    let mut path = std::env::temp_dir();
+    path.push(format!("kuu-tmp-{}.tmp", vm.math_next_u64()));
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(&path)
+        .map_err(|error| KError::new(KErrorKind::Runtime(error.to_string()), None))?;
+    let handle = vm.new_userdata(UserdataObject::File(FileObject {
+        kind: FileKind::File(file),
+    }))?;
+    Ok(vec![Value::userdata(handle)])
+}
+
+stub_native!(
+    native_string_gmatch,
+    native_string_pack,
+    native_string_unpack,
+    native_string_packsize,
+    native_utf8_char,
+    native_utf8_codes,
+    native_utf8_codepoint,
+    native_utf8_len,
+    native_table_concat,
+    native_table_insert,
+    native_table_remove,
+    native_table_move,
+    native_table_pack,
+    native_table_unpack,
+    native_table_sort,
+    native_io_lines,
+    native_package_searchpath,
+    native_package_loadlib,
+    native_require,
+    native_debug_traceback,
+    native_debug_getinfo,
+    native_debug_getupvalue,
+    native_debug_setupvalue,
+    native_debug_upvalueid,
+    native_debug_upvaluejoin,
+    native_debug_getlocal,
+    native_debug_setlocal,
+    native_debug_gethook,
+    native_debug_sethook,
+    native_debug_getregistry,
+);
+
+fn string_text(vm: &Vm, args: &[Value]) -> KResult<String> {
+    match args.first().copied().unwrap_or(Value::nil()) {
+        Value::String(handle) => {
+            let bytes = vm.heap.string_bytes(handle).ok_or_else(|| {
+                KError::new(
+                    KErrorKind::Runtime("invalid string handle".to_owned()),
+                    None,
+                )
+            })?;
+            Ok(String::from_utf8_lossy(bytes).into_owned())
+        }
+        other => Err(KError::new(
+            KErrorKind::Runtime(format!(
+                "expected string, got {}",
+                vm.value_type_name(other)
+            )),
+            None,
+        )),
+    }
+}
+
+fn string_case<F>(vm: &mut Vm, args: &[Value], transform: F) -> KResult<Vec<Value>>
+where
+    F: FnOnce(String) -> String,
+{
+    let text = string_text(vm, args)?;
+    let handle = vm.heap.intern_string(transform(text).into_bytes())?;
+    Ok(vec![Value::string(handle)])
+}
+
+fn quote_lua_string(vm: &Vm, value: Value) -> KResult<String> {
+    let text = match value {
+        Value::String(handle) => {
+            let bytes = vm.heap.string_bytes(handle).ok_or_else(|| {
+                KError::new(
+                    KErrorKind::Runtime("invalid string handle".to_owned()),
+                    None,
+                )
+            })?;
+            String::from_utf8_lossy(bytes).into_owned()
+        }
+        other => vm.format_value(other)?,
+    };
+    let mut out = String::from("\"");
+    for ch in text.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\u{7}' => out.push_str("\\a"),
+            '\u{8}' => out.push_str("\\b"),
+            '\u{c}' => out.push_str("\\f"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\u{b}' => out.push_str("\\v"),
+            ch if ch.is_control() => out.push_str(&format!("\\{:03}", u32::from(ch))),
+            ch => out.push(ch),
+        }
+    }
+    out.push('"');
+    Ok(out)
+}
+
+fn normalize_lua_index(value: i64, len: i64, default: i64) -> i64 {
+    if value < 0 {
+        (len + value + 1).max(1)
+    } else if value == 0 {
+        default
+    } else {
+        value.min(len)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum GcMode {
     Incremental,
@@ -461,6 +2647,15 @@ enum GcPhase {
 #[derive(Debug, Clone)]
 pub struct Vm {
     heap: Heap,
+    userdatas: Vec<Option<Rc<RefCell<UserdataObject>>>>,
+    warn_enabled: bool,
+    start_instant: std::time::Instant,
+    os_locale: String,
+    file_metatable: TableHandle,
+    current_input: UserdataHandle,
+    current_output: UserdataHandle,
+    math_rng_state: [u64; 4],
+    math_rng_seed: (u64, u64),
     stack: Vec<Value>,
     frames: Vec<Frame>,
     open_upvalues: Vec<UpvalueHandle>,
@@ -482,15 +2677,17 @@ impl Vm {
         let mut heap = Heap::new();
         let globals = heap.new_table()?;
         let string_metatable = heap.new_table()?;
-        {
-            let print_name = heap.intern_string(b"print".to_vec())?;
-            let gc_name = heap.intern_string(b"collectgarbage".to_vec())?;
-            let table = heap.resolve_table_mut(globals)?;
-            table.raw_set(Value::string(print_name), Value::native(native_print))?;
-            table.raw_set(Value::string(gc_name), Value::native(native_collectgarbage))?;
-        }
-        Ok(Self {
+        let mut vm = Self {
             heap,
+            userdatas: Vec::new(),
+            warn_enabled: true,
+            start_instant: std::time::Instant::now(),
+            os_locale: "C".to_owned(),
+            file_metatable: TableHandle::new(0),
+            current_input: UserdataHandle::new(0),
+            current_output: UserdataHandle::new(0),
+            math_rng_state: [0; 4],
+            math_rng_seed: (0, 0),
             stack: Vec::new(),
             frames: Vec::new(),
             open_upvalues: Vec::new(),
@@ -505,7 +2702,10 @@ impl Vm {
             gc_sweep_cursor: 0,
             gc_finalize_queue: Vec::new(),
             gc_metrics: GcMetrics::default(),
-        })
+        };
+        vm.math_seed_rng(0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210);
+        vm.install_stdlib()?;
+        Ok(vm)
     }
 
     pub fn run_proto(&mut self, proto: &Proto) -> KResult<Vec<Value>> {
@@ -1052,7 +3252,7 @@ impl Vm {
             )
         })?;
         let count = if args == u16::MAX {
-            frame.last_call_results
+            frame.top.saturating_sub(start)
         } else {
             usize::from(args)
         };
@@ -1117,11 +3317,11 @@ impl Vm {
         results: usize,
     ) -> KResult<()> {
         let proto = self.heap.resolve_closure(closure)?.proto.clone();
+        let frame_stack_size = usize::from(proto.stack_size.max(1)).max(args.len());
         self.ensure_stack_len(
-            base.checked_add(usize::from(proto.stack_size.max(1)))
-                .ok_or_else(|| {
-                    KError::new(KErrorKind::Runtime("stack overflow".to_owned()), None)
-                })?,
+            base.checked_add(frame_stack_size).ok_or_else(|| {
+                KError::new(KErrorKind::Runtime("stack overflow".to_owned()), None)
+            })?,
         )?;
 
         for (index, value) in args.iter().enumerate() {
@@ -1157,11 +3357,9 @@ impl Vm {
         let frame = Frame {
             closure,
             base,
-            top: base
-                .checked_add(usize::from(proto.stack_size.max(1)))
-                .ok_or_else(|| {
-                    KError::new(KErrorKind::Runtime("stack overflow".to_owned()), None)
-                })?,
+            top: base.checked_add(frame_stack_size).ok_or_else(|| {
+                KError::new(KErrorKind::Runtime("stack overflow".to_owned()), None)
+            })?,
             pc: 0,
             return_target: Some(ReturnTarget { base, results }),
             varargs,
@@ -1180,12 +3378,12 @@ impl Vm {
         args: Vec<Value>,
     ) -> KResult<()> {
         let proto = self.heap.resolve_closure(closure)?.proto.clone();
+        let frame_stack_size = usize::from(proto.stack_size.max(1)).max(args.len());
         self.close_upvalues_from(base)?;
         self.ensure_stack_len(
-            base.checked_add(usize::from(proto.stack_size.max(1)))
-                .ok_or_else(|| {
-                    KError::new(KErrorKind::Runtime("stack overflow".to_owned()), None)
-                })?,
+            base.checked_add(frame_stack_size).ok_or_else(|| {
+                KError::new(KErrorKind::Runtime("stack overflow".to_owned()), None)
+            })?,
         )?;
 
         for (index, value) in args.iter().enumerate() {
@@ -1225,7 +3423,7 @@ impl Vm {
         frame.closure = closure;
         frame.base = base;
         frame.top = base
-            .checked_add(usize::from(proto.stack_size.max(1)))
+            .checked_add(frame_stack_size)
             .ok_or_else(|| KError::new(KErrorKind::Runtime("stack overflow".to_owned()), None))?;
         frame.pc = 0;
         frame.varargs = varargs;
@@ -1393,6 +3591,7 @@ impl Vm {
         }
         if let Some(frame) = self.frames.get_mut(frame_index) {
             frame.last_call_results = written;
+            frame.top = start.saturating_add(written);
         }
         Ok(())
     }
@@ -2122,9 +4321,15 @@ impl Vm {
                 None,
             ));
         }
-        let mut current = self.stack.get(start).copied().unwrap_or(Value::nil());
-        for index in start + 1..=end {
-            let next = self.stack.get(index).copied().unwrap_or(Value::nil());
+        let mut values = Vec::new();
+        for index in start..=end {
+            values.push(self.stack.get(index).copied().unwrap_or(Value::nil()));
+        }
+        let Some((first, rest)) = values.split_first() else {
+            return Ok(Value::nil());
+        };
+        let mut current = *first;
+        for &next in rest {
             current = self.concat_pair(current, next, 0)?;
         }
         Ok(current)
@@ -2322,6 +4527,7 @@ impl Vm {
         match value {
             Value::Table(handle) => self.heap.resolve_table(handle).ok()?.metatable,
             Value::String(_) => Some(self.string_metatable),
+            Value::Userdata(_) => Some(self.file_metatable),
             _ => None,
         }
     }
@@ -2361,11 +4567,13 @@ impl Vm {
         args: Vec<Value>,
         _depth: usize,
     ) -> KResult<Value> {
+        let returned = self.call_value_multi(callee, args)?;
+        Ok(returned.into_iter().next().unwrap_or(Value::nil()))
+    }
+
+    fn call_value_multi(&mut self, callee: Value, args: Vec<Value>) -> KResult<Vec<Value>> {
         match callee {
-            Value::NativeFunction(function) => {
-                let returned = self.call_native(function, &args)?;
-                Ok(returned.into_iter().next().unwrap_or(Value::nil()))
-            }
+            Value::NativeFunction(function) => self.call_native(function, &args),
             Value::Closure(handle) => {
                 let saved_stack = std::mem::take(&mut self.stack);
                 let saved_frames = std::mem::take(&mut self.frames);
@@ -2381,13 +4589,96 @@ impl Vm {
                 if let Some(frame) = self.frames.last_mut() {
                     frame.last_call_results = saved_last_results;
                 }
-                result.map(|values| values.into_iter().next().unwrap_or(Value::nil()))
+                result
             }
             _ => Err(KError::new(
                 KErrorKind::Runtime("attempt to call a non-callable value".to_owned()),
                 None,
             )),
         }
+    }
+
+    fn load_chunk_bytes(
+        &mut self,
+        bytes: &[u8],
+        mode: Option<&str>,
+        env: Option<Value>,
+    ) -> KResult<ClosureHandle> {
+        let is_binary = bytes.starts_with(b"KUUBIN\0");
+        match mode {
+            Some("b") if !is_binary => {
+                return Err(KError::new(
+                    KErrorKind::Runtime("attempt to load a text chunk as binary".to_owned()),
+                    None,
+                ));
+            }
+            Some("t") if is_binary => {
+                return Err(KError::new(
+                    KErrorKind::Runtime("attempt to load a binary chunk as text".to_owned()),
+                    None,
+                ));
+            }
+            _ => {}
+        }
+
+        let proto = if is_binary {
+            Proto::decode(bytes.get(7..).ok_or_else(|| {
+                KError::new(
+                    KErrorKind::Runtime("binary chunk header truncated".to_owned()),
+                    None,
+                )
+            })?)?
+        } else {
+            let source = std::str::from_utf8(bytes).map_err(|_| {
+                KError::new(
+                    KErrorKind::Runtime("source chunk must be valid UTF-8".to_owned()),
+                    None,
+                )
+            })?;
+            let mut parser = Parser::new(source)?;
+            let chunk = parser.parse_chunk()?;
+            let mut compiler = Compiler::new();
+            compiler.compile_chunk(&chunk)?
+        };
+
+        match env {
+            Some(Value::Table(env_table)) => {
+                self.instantiate_root_closure_with_env(proto, env_table)
+            }
+            Some(other) => Err(KError::new(
+                KErrorKind::Runtime(format!(
+                    "load environment must be a table, got {}",
+                    self.value_type_name(other)
+                )),
+                None,
+            )),
+            None => self.instantiate_root_closure(proto),
+        }
+    }
+
+    fn instantiate_root_closure_with_env(
+        &mut self,
+        proto: Proto,
+        env: TableHandle,
+    ) -> KResult<ClosureHandle> {
+        let mut upvalues = Vec::with_capacity(proto.upvalues.len());
+        for descriptor in &proto.upvalues {
+            if descriptor.instack {
+                return Err(KError::new(
+                    KErrorKind::Runtime("root closure cannot capture stack values".to_owned()),
+                    None,
+                ));
+            }
+            if descriptor.index == 0 {
+                upvalues.push(self.heap.new_upvalue_closed(Value::table(env))?);
+            } else {
+                return Err(KError::new(
+                    KErrorKind::Runtime("root closure missing parent upvalue".to_owned()),
+                    None,
+                ));
+            }
+        }
+        self.heap.new_closure(proto, upvalues)
     }
 
     fn run_closure_with_args(
@@ -2400,11 +4691,12 @@ impl Vm {
         self.open_upvalues.clear();
 
         let stack_size = self.heap.resolve_closure(closure)?.proto.stack_size.max(1);
-        self.ensure_stack_len(usize::from(stack_size))?;
+        let frame_stack_size = usize::from(stack_size).max(args.len());
+        self.ensure_stack_len(frame_stack_size)?;
         self.frames.push(Frame {
             closure,
             base: 0,
-            top: usize::from(stack_size),
+            top: frame_stack_size,
             pc: 0,
             return_target: None,
             varargs: Vec::new(),
@@ -3040,6 +5332,413 @@ impl Vm {
         let key = self.heap.intern_string(b"__gc".to_vec())?;
         let metatable_table = self.heap.resolve_table(metatable)?;
         metatable_table.raw_get(Value::string(key))
+    }
+
+    fn math_seed_rng(&mut self, seed_x: u64, seed_y: u64) {
+        self.math_rng_seed = (seed_x, seed_y);
+        self.math_rng_state[0] = seed_x;
+        self.math_rng_state[1] = 0xff;
+        self.math_rng_state[2] = seed_y;
+        self.math_rng_state[3] = 0;
+        for _ in 0..16 {
+            let _ = self.math_next_u64();
+        }
+    }
+
+    fn math_next_u64(&mut self) -> u64 {
+        let result = self.math_rng_state[1]
+            .wrapping_mul(5)
+            .rotate_left(7)
+            .wrapping_mul(9);
+        let t = self.math_rng_state[1] << 17;
+
+        self.math_rng_state[2] ^= self.math_rng_state[0];
+        self.math_rng_state[3] ^= self.math_rng_state[1];
+        self.math_rng_state[1] ^= self.math_rng_state[2];
+        self.math_rng_state[0] ^= self.math_rng_state[3];
+        self.math_rng_state[2] ^= t;
+        self.math_rng_state[3] = self.math_rng_state[3].rotate_left(45);
+        result
+    }
+
+    #[allow(dead_code)]
+    fn math_next_f64(&mut self) -> f64 {
+        let bits = self.math_next_u64() >> 11;
+        (bits as f64) * (1.0 / ((1u64 << 53) as f64))
+    }
+
+    fn math_random_integer(&mut self, low: i128, high: i128) -> KResult<i128> {
+        let span = high
+            .checked_sub(low)
+            .and_then(|value| value.checked_add(1))
+            .ok_or_else(|| {
+                KError::new(
+                    KErrorKind::Runtime("random interval overflow".to_owned()),
+                    None,
+                )
+            })?;
+        if span <= 0 {
+            return Err(KError::new(
+                KErrorKind::Runtime("random interval overflow".to_owned()),
+                None,
+            ));
+        }
+
+        let span_u128 = u128::try_from(span).map_err(|_| {
+            KError::new(
+                KErrorKind::Runtime("random interval overflow".to_owned()),
+                None,
+            )
+        })?;
+        let limit = (u128::from(u64::MAX) + 1) / span_u128 * span_u128;
+        loop {
+            let sample = u128::from(self.math_next_u64());
+            if sample < limit {
+                let offset = sample % span_u128;
+                let offset = i128::try_from(offset).map_err(|_| {
+                    KError::new(
+                        KErrorKind::Runtime("random interval overflow".to_owned()),
+                        None,
+                    )
+                })?;
+                return Ok(low + offset);
+            }
+        }
+    }
+
+    fn install_stdlib(&mut self) -> KResult<()> {
+        self.install_base_lib()?;
+        self.install_string_lib()?;
+        self.install_utf8_lib()?;
+        self.install_table_lib()?;
+        self.install_math_lib()?;
+        self.install_io_lib()?;
+        self.install_os_lib()?;
+        self.install_package_lib()?;
+        self.install_debug_lib()?;
+        Ok(())
+    }
+
+    fn install_base_lib(&mut self) -> KResult<()> {
+        self.set_global_value(b"_G", Value::table(self.globals))?;
+        let version = self.heap.intern_string(b"Lua 5.5".to_vec())?;
+        self.set_global_value(b"_VERSION", Value::string(version))?;
+
+        self.set_global_native(b"assert", native_assert)?;
+        self.set_global_native(b"error", native_error)?;
+        self.set_global_native(b"getmetatable", native_getmetatable)?;
+        self.set_global_native(b"setmetatable", native_setmetatable)?;
+        self.set_global_native(b"rawequal", native_rawequal)?;
+        self.set_global_native(b"rawget", native_rawget)?;
+        self.set_global_native(b"rawset", native_rawset)?;
+        self.set_global_native(b"rawlen", native_rawlen)?;
+        self.set_global_native(b"select", native_select)?;
+        self.set_global_native(b"tonumber", native_tonumber)?;
+        self.set_global_native(b"tostring", native_tostring)?;
+        self.set_global_native(b"type", native_type)?;
+        self.set_global_native(b"warn", native_warn)?;
+        self.set_global_native(b"load", native_load)?;
+        self.set_global_native(b"loadfile", native_loadfile)?;
+        self.set_global_native(b"dofile", native_dofile)?;
+        self.set_global_native(b"pcall", native_pcall)?;
+        self.set_global_native(b"xpcall", native_xpcall)?;
+        self.set_global_native(b"pairs", native_pairs)?;
+        self.set_global_native(b"ipairs", native_ipairs)?;
+        self.set_global_native(b"next", native_next)?;
+        self.set_global_native(b"print", native_print)?;
+        self.set_global_native(b"collectgarbage", native_collectgarbage)?;
+        Ok(())
+    }
+
+    fn install_string_lib(&mut self) -> KResult<()> {
+        let table = self.heap.new_table()?;
+        self.set_module_table("string", table)?;
+        self.set_module_function(table, b"dump", native_string_dump)?;
+        self.set_module_function(table, b"len", native_string_len)?;
+        self.set_module_function(table, b"sub", native_string_sub)?;
+        self.set_module_function(table, b"byte", native_string_byte)?;
+        self.set_module_function(table, b"char", native_string_char)?;
+        self.set_module_function(table, b"rep", native_string_rep)?;
+        self.set_module_function(table, b"lower", native_string_lower)?;
+        self.set_module_function(table, b"upper", native_string_upper)?;
+        self.set_module_function(table, b"reverse", native_string_reverse)?;
+        self.set_module_function(table, b"format", native_string_format)?;
+        self.set_module_function(table, b"find", native_string_find)?;
+        self.set_module_function(table, b"match", native_string_match)?;
+        self.set_module_function(table, b"gsub", native_string_gsub)?;
+        self.set_module_function(table, b"gmatch", native_string_gmatch)?;
+        self.set_module_function(table, b"pack", native_string_pack)?;
+        self.set_module_function(table, b"unpack", native_string_unpack)?;
+        self.set_module_function(table, b"packsize", native_string_packsize)?;
+        Ok(())
+    }
+
+    fn install_utf8_lib(&mut self) -> KResult<()> {
+        let table = self.heap.new_table()?;
+        self.set_module_table("utf8", table)?;
+        self.set_module_function(table, b"char", native_utf8_char)?;
+        self.set_module_function(table, b"codes", native_utf8_codes)?;
+        self.set_module_function(table, b"codepoint", native_utf8_codepoint)?;
+        self.set_module_function(table, b"len", native_utf8_len)?;
+        let charpattern = self
+            .heap
+            .intern_string(b"[\x00-\x7F\xc0-\xfd][\x80-\xbf]*".to_vec())?;
+        self.set_module_value(table, b"charpattern", Value::string(charpattern))?;
+        Ok(())
+    }
+
+    fn install_table_lib(&mut self) -> KResult<()> {
+        let table = self.heap.new_table()?;
+        self.set_module_table("table", table)?;
+        self.set_module_function(table, b"concat", native_table_concat)?;
+        self.set_module_function(table, b"insert", native_table_insert)?;
+        self.set_module_function(table, b"remove", native_table_remove)?;
+        self.set_module_function(table, b"move", native_table_move)?;
+        self.set_module_function(table, b"pack", native_table_pack)?;
+        self.set_module_function(table, b"unpack", native_table_unpack)?;
+        self.set_module_function(table, b"sort", native_table_sort)?;
+        Ok(())
+    }
+
+    fn install_math_lib(&mut self) -> KResult<()> {
+        let table = self.heap.new_table()?;
+        self.set_module_table("math", table)?;
+        self.set_module_function(table, b"abs", native_math_abs)?;
+        self.set_module_function(table, b"acos", native_math_acos)?;
+        self.set_module_function(table, b"asin", native_math_asin)?;
+        self.set_module_function(table, b"atan", native_math_atan)?;
+        self.set_module_function(table, b"ceil", native_math_ceil)?;
+        self.set_module_function(table, b"cos", native_math_cos)?;
+        self.set_module_function(table, b"deg", native_math_deg)?;
+        self.set_module_function(table, b"exp", native_math_exp)?;
+        self.set_module_function(table, b"floor", native_math_floor)?;
+        self.set_module_function(table, b"fmod", native_math_fmod)?;
+        self.set_module_function(table, b"frexp", native_math_frexp)?;
+        self.set_module_function(table, b"max", native_math_max)?;
+        self.set_module_function(table, b"min", native_math_min)?;
+        self.set_module_function(table, b"log", native_math_log)?;
+        self.set_module_function(table, b"modf", native_math_modf)?;
+        self.set_module_function(table, b"rad", native_math_rad)?;
+        self.set_module_function(table, b"random", native_math_random)?;
+        self.set_module_function(table, b"randomseed", native_math_randomseed)?;
+        self.set_module_function(table, b"sin", native_math_sin)?;
+        self.set_module_function(table, b"sqrt", native_math_sqrt)?;
+        self.set_module_function(table, b"tan", native_math_tan)?;
+        self.set_module_function(table, b"tointeger", native_math_tointeger)?;
+        self.set_module_function(table, b"type", native_math_type)?;
+        self.set_module_function(table, b"ult", native_math_ult)?;
+        self.set_module_value(table, b"pi", Value::number(std::f64::consts::PI))?;
+        self.set_module_value(table, b"huge", Value::number(f64::INFINITY))?;
+        self.set_module_value(table, b"maxinteger", Value::integer(i64::MAX))?;
+        self.set_module_value(table, b"mininteger", Value::integer(i64::MIN))?;
+        Ok(())
+    }
+
+    fn install_io_lib(&mut self) -> KResult<()> {
+        let table = self.heap.new_table()?;
+        self.set_module_table("io", table)?;
+        let file_metatable = self.heap.new_table()?;
+        self.file_metatable = file_metatable;
+        let file_name = self.heap.intern_string(b"FILE*".to_vec())?;
+        self.set_module_value(file_metatable, b"__name", Value::string(file_name))?;
+        self.set_module_value(file_metatable, b"__index", Value::table(file_metatable))?;
+        self.set_module_function(file_metatable, b"close", native_io_close)?;
+        self.set_module_function(file_metatable, b"write", native_io_write)?;
+        self.set_module_function(file_metatable, b"read", native_io_read)?;
+        self.set_module_function(file_metatable, b"flush", native_io_close)?;
+        self.set_module_function(file_metatable, b"seek", native_io_read)?;
+        self.set_module_function(table, b"open", native_io_open)?;
+        self.set_module_function(table, b"lines", native_io_lines)?;
+        self.set_module_function(table, b"input", native_io_input)?;
+        self.set_module_function(table, b"output", native_io_output)?;
+        self.set_module_function(table, b"read", native_io_read)?;
+        self.set_module_function(table, b"write", native_io_write)?;
+        self.set_module_function(table, b"close", native_io_close)?;
+        self.set_module_function(table, b"tmpfile", native_io_tmpfile)?;
+        let stdin = self.new_userdata(UserdataObject::File(FileObject {
+            kind: FileKind::Stdin,
+        }))?;
+        let stdout = self.new_userdata(UserdataObject::File(FileObject {
+            kind: FileKind::Stdout,
+        }))?;
+        let stderr = self.new_userdata(UserdataObject::File(FileObject {
+            kind: FileKind::Stderr,
+        }))?;
+        self.current_input = stdin;
+        self.current_output = stdout;
+        self.set_module_value(table, b"stdin", Value::userdata(stdin))?;
+        self.set_module_value(table, b"stdout", Value::userdata(stdout))?;
+        self.set_module_value(table, b"stderr", Value::userdata(stderr))?;
+        self.set_module_function(table, b"type", native_io_type)?;
+        Ok(())
+    }
+
+    fn install_os_lib(&mut self) -> KResult<()> {
+        let table = self.heap.new_table()?;
+        self.set_module_table("os", table)?;
+        self.set_module_function(table, b"execute", native_os_execute)?;
+        self.set_module_function(table, b"clock", native_os_clock)?;
+        self.set_module_function(table, b"difftime", native_os_difftime)?;
+        self.set_module_function(table, b"time", native_os_time)?;
+        self.set_module_function(table, b"tmpname", native_os_tmpname)?;
+        self.set_module_function(table, b"rename", native_os_rename)?;
+        self.set_module_function(table, b"remove", native_os_remove)?;
+        self.set_module_function(table, b"setlocale", native_os_setlocale)?;
+        Ok(())
+    }
+
+    fn install_package_lib(&mut self) -> KResult<()> {
+        let table = self.heap.new_table()?;
+        self.set_module_table("package", table)?;
+        let loaded = self.heap.new_table()?;
+        let preload = self.heap.new_table()?;
+        let searchers = self.heap.new_table()?;
+        let path = self.heap.intern_string(b"?.lua;?/init.lua".to_vec())?;
+        let cpath = self.heap.intern_string(b"".to_vec())?;
+        let config = self.heap.intern_string(b"/\n;\n?\n!\n-".to_vec())?;
+        self.set_module_value(table, b"loaded", Value::table(loaded))?;
+        self.set_module_value(table, b"preload", Value::table(preload))?;
+        self.set_module_value(table, b"searchers", Value::table(searchers))?;
+        self.set_module_value(table, b"path", Value::string(path))?;
+        self.set_module_value(table, b"cpath", Value::string(cpath))?;
+        self.set_module_value(table, b"config", Value::string(config))?;
+        self.set_module_function(table, b"searchpath", native_package_searchpath)?;
+        self.set_module_function(table, b"loadlib", native_package_loadlib)?;
+        self.set_module_function(table, b"require", native_require)?;
+        Ok(())
+    }
+
+    fn install_debug_lib(&mut self) -> KResult<()> {
+        let table = self.heap.new_table()?;
+        self.set_module_table("debug", table)?;
+        self.set_module_function(table, b"traceback", native_debug_traceback)?;
+        self.set_module_function(table, b"getinfo", native_debug_getinfo)?;
+        self.set_module_function(table, b"getupvalue", native_debug_getupvalue)?;
+        self.set_module_function(table, b"setupvalue", native_debug_setupvalue)?;
+        self.set_module_function(table, b"upvalueid", native_debug_upvalueid)?;
+        self.set_module_function(table, b"upvaluejoin", native_debug_upvaluejoin)?;
+        self.set_module_function(table, b"getlocal", native_debug_getlocal)?;
+        self.set_module_function(table, b"setlocal", native_debug_setlocal)?;
+        self.set_module_function(table, b"gethook", native_debug_gethook)?;
+        self.set_module_function(table, b"sethook", native_debug_sethook)?;
+        self.set_module_function(table, b"getregistry", native_debug_getregistry)?;
+        Ok(())
+    }
+
+    fn set_module_table(&mut self, name: &str, table: TableHandle) -> KResult<()> {
+        let handle = self.heap.intern_string(name.as_bytes().to_vec())?;
+        let table_value = Value::table(table);
+        self.set_global_value(name.as_bytes(), table_value)?;
+        self.heap
+            .resolve_table_mut(self.globals)?
+            .raw_set(Value::string(handle), table_value)
+    }
+
+    fn set_module_value(&mut self, table: TableHandle, name: &[u8], value: Value) -> KResult<()> {
+        let key = self.heap.intern_string(name.to_vec())?;
+        self.heap
+            .resolve_table_mut(table)?
+            .raw_set(Value::string(key), value)
+    }
+
+    fn set_module_function(
+        &mut self,
+        table: TableHandle,
+        name: &[u8],
+        function: NativeFunction,
+    ) -> KResult<()> {
+        self.set_module_value(table, name, Value::native(function))
+    }
+
+    fn set_global_native(&mut self, name: &[u8], function: NativeFunction) -> KResult<()> {
+        let key = self.heap.intern_string(name.to_vec())?;
+        self.heap
+            .resolve_table_mut(self.globals)?
+            .raw_set(Value::string(key), Value::native(function))
+    }
+
+    fn set_global_value(&mut self, name: &[u8], value: Value) -> KResult<()> {
+        let key = self.heap.intern_string(name.to_vec())?;
+        self.heap
+            .resolve_table_mut(self.globals)?
+            .raw_set(Value::string(key), value)
+    }
+
+    pub fn global_value(&self, name: &[u8]) -> KResult<Option<Value>> {
+        let table = self.heap.resolve_table(self.globals)?;
+        for (key, value) in &table.hash {
+            let LuaKey::String(handle) = key else {
+                continue;
+            };
+            let Some(bytes) = self.heap.string_bytes(*handle) else {
+                continue;
+            };
+            if bytes == name {
+                return Ok(Some(*value));
+            }
+        }
+        Ok(None)
+    }
+
+    pub fn set_cli_args(&mut self, binary: &str, script: &str, args: &[String]) -> KResult<()> {
+        let table = self.heap.new_table()?;
+        let binary_handle = self.heap.intern_string(binary.as_bytes().to_vec())?;
+        let script_handle = self.heap.intern_string(script.as_bytes().to_vec())?;
+        self.heap
+            .resolve_table_mut(table)?
+            .raw_set(Value::integer(-1), Value::string(binary_handle))?;
+        self.heap
+            .resolve_table_mut(table)?
+            .raw_set(Value::integer(0), Value::string(script_handle))?;
+        for (index, arg) in args.iter().enumerate() {
+            let slot = i64::try_from(index + 1).map_err(|_| {
+                KError::new(
+                    KErrorKind::Runtime("argument index overflow".to_owned()),
+                    None,
+                )
+            })?;
+            let handle = self.heap.intern_string(arg.as_bytes().to_vec())?;
+            self.heap
+                .resolve_table_mut(table)?
+                .raw_set(Value::integer(slot), Value::string(handle))?;
+        }
+        self.set_global_value(b"arg", Value::table(table))
+    }
+
+    #[allow(dead_code)]
+    fn new_table_value(&mut self) -> KResult<Value> {
+        Ok(Value::table(self.heap.new_table()?))
+    }
+
+    fn new_userdata(&mut self, object: UserdataObject) -> KResult<UserdataHandle> {
+        let raw = u64::try_from(self.userdatas.len()).map_err(|_| {
+            KError::new(
+                KErrorKind::Runtime("userdata handle overflow".to_owned()),
+                None,
+            )
+        })?;
+        self.userdatas.push(Some(Rc::new(RefCell::new(object))));
+        Ok(UserdataHandle::new(raw))
+    }
+
+    #[allow(dead_code)]
+    fn resolve_userdata(&self, handle: UserdataHandle) -> KResult<Rc<RefCell<UserdataObject>>> {
+        let index = usize::try_from(handle.raw()).map_err(|_| {
+            KError::new(
+                KErrorKind::Runtime("invalid userdata handle".to_owned()),
+                None,
+            )
+        })?;
+        self.userdatas
+            .get(index)
+            .and_then(Option::as_ref)
+            .cloned()
+            .ok_or_else(|| {
+                KError::new(
+                    KErrorKind::Runtime("invalid userdata handle".to_owned()),
+                    None,
+                )
+            })
     }
 }
 
