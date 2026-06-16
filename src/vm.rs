@@ -2893,212 +2893,7 @@ impl Vm {
     }
 
     fn run_closure(&mut self, closure: ClosureHandle) -> KResult<Vec<Value>> {
-        self.stack.clear();
-        self.frames.clear();
-        self.open_upvalues.clear();
-
-        self.stack.push(Value::closure(closure));
-        let stack_size = self.heap.resolve_closure(closure)?.proto.stack_size.max(1);
-        self.ensure_stack_len(usize::from(stack_size))?;
-        self.frames.push(Frame {
-            closure,
-            base: 0,
-            top: usize::from(stack_size),
-            pc: 0,
-            return_target: None,
-            varargs: Vec::new(),
-            last_call_results: 0,
-        });
-
-        let mut finished = Vec::new();
-        while !self.frames.is_empty() {
-            let frame_index = self.frames.len() - 1;
-            let instruction = self.current_instruction(frame_index)?;
-            match instruction {
-                Instruction::LoadNil { dst } => {
-                    self.write_register(frame_index, dst, Value::nil())?;
-                    self.advance_pc(frame_index)?;
-                }
-                Instruction::LoadBool { dst, value } => {
-                    self.write_register(frame_index, dst, Value::boolean(value))?;
-                    self.advance_pc(frame_index)?;
-                }
-                Instruction::LoadInteger { dst, value } => {
-                    self.write_register(frame_index, dst, Value::integer(value))?;
-                    self.advance_pc(frame_index)?;
-                }
-                Instruction::LoadNumber { dst, value } => {
-                    self.write_register(frame_index, dst, Value::number(value))?;
-                    self.advance_pc(frame_index)?;
-                }
-                Instruction::LoadConstant { dst, constant } => {
-                    let value = self.constant_to_value(frame_index, constant)?;
-                    self.write_register(frame_index, dst, value)?;
-                    self.advance_pc(frame_index)?;
-                }
-                Instruction::Move { dst, src } => {
-                    let value = self.read_register(frame_index, src)?;
-                    self.write_register(frame_index, dst, value)?;
-                    self.advance_pc(frame_index)?;
-                }
-                Instruction::GetGlobal { dst, name } => {
-                    let value = self.get_global(frame_index, name)?;
-                    self.write_register(frame_index, dst, value)?;
-                    self.advance_pc(frame_index)?;
-                }
-                Instruction::SetGlobal { src, name } => {
-                    let value = self.read_register(frame_index, src)?;
-                    self.set_global(frame_index, name, value)?;
-                    self.advance_pc(frame_index)?;
-                }
-                Instruction::GetTable { dst, table, key } => {
-                    let table_value = self.read_register(frame_index, table)?;
-                    let key_value = self.read_register(frame_index, key)?;
-                    let value = self.table_get(table_value, key_value)?;
-                    self.write_register(frame_index, dst, value)?;
-                    self.advance_pc(frame_index)?;
-                }
-                Instruction::SetTable { table, key, value } => {
-                    let table_value = self.read_register(frame_index, table)?;
-                    let key_value = self.read_register(frame_index, key)?;
-                    let value_value = self.read_register(frame_index, value)?;
-                    self.table_set(table_value, key_value, value_value)?;
-                    self.advance_pc(frame_index)?;
-                }
-                Instruction::Arithmetic {
-                    op,
-                    dst,
-                    left,
-                    right,
-                } => {
-                    let left_value = self.read_register(frame_index, left)?;
-                    let right_value = self.read_register(frame_index, right)?;
-                    let result = self.arithmetic(op, left_value, right_value)?;
-                    self.write_register(frame_index, dst, result)?;
-                    self.advance_pc(frame_index)?;
-                }
-                Instruction::Compare {
-                    op,
-                    dst,
-                    left,
-                    right,
-                } => {
-                    let left_value = self.read_register(frame_index, left)?;
-                    let right_value = self.read_register(frame_index, right)?;
-                    let result = self.compare(op, left_value, right_value)?;
-                    self.write_register(frame_index, dst, Value::boolean(result))?;
-                    self.advance_pc(frame_index)?;
-                }
-                Instruction::Jump { offset } => {
-                    self.jump(frame_index, offset)?;
-                }
-                Instruction::JumpIfTrue { cond, offset } => {
-                    let value = self.read_register(frame_index, cond)?;
-                    if self.is_truthy(value) {
-                        self.jump(frame_index, offset)?;
-                    } else {
-                        self.advance_pc(frame_index)?;
-                    }
-                }
-                Instruction::JumpIfFalse { cond, offset } => {
-                    let value = self.read_register(frame_index, cond)?;
-                    if !self.is_truthy(value) {
-                        self.jump(frame_index, offset)?;
-                    } else {
-                        self.advance_pc(frame_index)?;
-                    }
-                }
-                Instruction::NewTable { dst } => {
-                    let handle = self.heap.new_table()?;
-                    self.write_register(frame_index, dst, Value::table(handle))?;
-                    self.advance_pc(frame_index)?;
-                }
-                Instruction::Closure { dst, proto } => {
-                    let closure = self.instantiate_child_closure(frame_index, proto)?;
-                    self.write_register(frame_index, dst, Value::closure(closure))?;
-                    self.advance_pc(frame_index)?;
-                }
-                Instruction::GetUpvalue { dst, upvalue } => {
-                    let value = self.get_upvalue(frame_index, upvalue)?;
-                    self.write_register(frame_index, dst, value)?;
-                    self.advance_pc(frame_index)?;
-                }
-                Instruction::SetUpvalue { src, upvalue } => {
-                    let value = self.read_register(frame_index, src)?;
-                    self.set_upvalue(frame_index, upvalue, value)?;
-                    self.advance_pc(frame_index)?;
-                }
-                Instruction::Vararg { dst, count } => {
-                    self.write_varargs(frame_index, dst, count)?;
-                    self.advance_pc(frame_index)?;
-                }
-                Instruction::Call {
-                    function,
-                    args,
-                    results,
-                } => {
-                    let call_slot = self.absolute_register(frame_index, function)?;
-                    let callee = self.read_register(frame_index, function)?;
-                    let args = self.read_call_args(frame_index, function, args)?;
-                    self.advance_pc(frame_index)?;
-                    self.invoke_call(
-                        CallSite {
-                            frame_index,
-                            call_slot,
-                            results: usize::from(results),
-                            tail: false,
-                        },
-                        callee,
-                        args,
-                        &mut finished,
-                    )?;
-                }
-                Instruction::TailCall { function, args } => {
-                    let call_slot = self.absolute_register(frame_index, function)?;
-                    let callee = self.read_register(frame_index, function)?;
-                    let args = self.read_call_args(frame_index, function, args)?;
-                    self.invoke_call(
-                        CallSite {
-                            frame_index,
-                            call_slot,
-                            results: 0,
-                            tail: true,
-                        },
-                        callee,
-                        args,
-                        &mut finished,
-                    )?;
-                }
-                Instruction::Return { first, count } => {
-                    let values = self.collect_return_values(frame_index, first, count)?;
-                    self.finish_frame(frame_index, values, &mut finished)?;
-                }
-                Instruction::Close { from } => {
-                    let stack_index = self.absolute_register(frame_index, from)?;
-                    self.close_upvalues_from(stack_index)?;
-                    self.advance_pc(frame_index)?;
-                }
-                Instruction::Concat { dst, first, last } => {
-                    let value = self.concat_values(frame_index, first, last)?;
-                    self.write_register(frame_index, dst, value)?;
-                    self.advance_pc(frame_index)?;
-                }
-                Instruction::Unary { op, dst, src } => {
-                    let value = self.read_register(frame_index, src)?;
-                    let result = self.unary(op, value)?;
-                    self.write_register(frame_index, dst, result)?;
-                    self.advance_pc(frame_index)?;
-                }
-                Instruction::ForPrep { base, offset } => {
-                    self.for_prep(frame_index, base, offset)?;
-                }
-                Instruction::ForLoop { base, offset } => {
-                    self.for_loop(frame_index, base, offset)?;
-                }
-            }
-        }
-
-        Ok(finished)
+        self.run_closure_with_args(closure, Vec::new())
     }
 
     fn instantiate_root_closure(&mut self, proto: Proto) -> KResult<ClosureHandle> {
@@ -6108,6 +5903,13 @@ mod tests {
     use super::*;
     use std::sync::atomic::{AtomicBool, Ordering};
 
+    fn compile_proto(source: &str) -> KResult<Proto> {
+        let mut parser = Parser::new(source)?;
+        let chunk = parser.parse_chunk()?;
+        let mut compiler = Compiler::new();
+        compiler.compile_chunk(&chunk)
+    }
+
     fn intern_string(vm: &mut Vm, bytes: &[u8]) -> KResult<Value> {
         let handle = vm.heap.intern_string(bytes.to_vec())?;
         Ok(Value::string(handle))
@@ -6157,6 +5959,33 @@ mod tests {
 
         let value = vm.arithmetic(ArithmeticOp::Add, Value::table(table), Value::integer(5))?;
         assert_eq!(value, Value::integer(42));
+        Ok(())
+    }
+
+    #[test]
+    fn run_proto_executes_root_and_nested_calls() -> Result<(), Box<dyn std::error::Error>> {
+        let mut vm = Vm::new()?;
+        let proto = compile_proto(
+            "local t = {}\n\
+             t.root = 1\n\
+             local function bump(a, ...)\n\
+               t.inner = a + 1\n\
+               return ...\n\
+             end\n\
+             local first, second = bump(41, 42, 43)\n\
+             return t.root, t.inner, first, second\n",
+        )?;
+
+        let results = vm.run_proto(&proto)?;
+        assert_eq!(
+            results,
+            vec![
+                Value::integer(1),
+                Value::integer(42),
+                Value::integer(42),
+                Value::integer(43),
+            ]
+        );
         Ok(())
     }
 
