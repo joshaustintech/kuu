@@ -778,8 +778,11 @@ pub fn native_load(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
         }
     };
     let mode = vm.optional_string_text_arg(args, 2)?;
-    let env = vm.arg_or_nil(args, 3);
-    let closure = vm.load_chunk_bytes(&source, mode.as_deref(), Some(env))?;
+    let env = match vm.arg_or_nil(args, 3) {
+        Value::Nil => None,
+        value => Some(value),
+    };
+    let closure = vm.load_chunk_bytes(&source, mode.as_deref(), env)?;
     Ok(vec![Value::closure(closure)])
 }
 
@@ -787,8 +790,11 @@ pub fn native_loadfile(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     let path = vm.string_text_arg_typed(args, 0, "loadfile expects a string path")?;
     let bytes = fs::read(&path)?;
     let mode = vm.optional_string_text_arg(args, 1)?;
-    let env = vm.arg_or_nil(args, 2);
-    let closure = vm.load_chunk_bytes(&bytes, mode.as_deref(), Some(env))?;
+    let env = match vm.arg_or_nil(args, 2) {
+        Value::Nil => None,
+        value => Some(value),
+    };
+    let closure = vm.load_chunk_bytes(&bytes, mode.as_deref(), env)?;
     Ok(vec![Value::closure(closure)])
 }
 

@@ -37,6 +37,23 @@ fn global_require_returns_loaded_module() -> Result<(), Box<dyn std::error::Erro
 }
 
 #[test]
+fn load_uses_global_environment_when_env_is_nil() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec!["-e".to_owned(), "print(load('return 2')())".to_owned()],
+        ..RunOptions::default()
+    })?;
+
+    let expected = ExpectedRun {
+        stdout: b"2\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+
+    assert!(compare_run(&actual, &expected).is_ok());
+    Ok(())
+}
+
+#[test]
 fn string_packsize_reports_lua_integer_width() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
         args: vec!["-e".to_owned(), "print(string.packsize('j'))".to_owned()],
