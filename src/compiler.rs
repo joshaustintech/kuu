@@ -1397,15 +1397,14 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     fn compile_number_into(&mut self, dst: Register, lexeme: &str) -> KResult<()> {
-        if let Ok(value) = lexeme.parse::<i64>() {
+        if let Some(value) = parse_integer_literal(lexeme) {
             self.instructions
                 .push(Instruction::LoadInteger { dst, value });
             return Ok(());
         }
 
-        let value = lexeme
-            .parse::<f64>()
-            .map_err(|_| KError::bytecode(format!("invalid numeric literal {lexeme}")))?;
+        let value = parse_number_literal(lexeme)
+            .ok_or_else(|| KError::bytecode(format!("invalid numeric literal {lexeme}")))?;
         self.instructions
             .push(Instruction::LoadNumber { dst, value });
         Ok(())
@@ -1669,4 +1668,40 @@ impl<'a> FunctionCompiler<'a> {
             Some(Instruction::Return { .. } | Instruction::TailCall { .. })
         )
     }
+}
+
+fn parse_integer_literal(lexeme: &str) -> Option<i64> {
+    if let Some(digits) = lexeme
+        .strip_prefix("0x")
+        .or_else(|| lexeme.strip_prefix("0X"))
+    {
+        if digits.contains(['.', 'p', 'P']) {
+            return None;
+        }
+        let value = u64::from_str_radix(digits, 16).ok()?;
+        return Some(i64::from_ne_bytes(value.to_ne_bytes()));
+    }
+    lexeme.parse::<i64>().ok()
+}
+
+fn parse_number_literal(lexeme: &str) -> Option<f64> {
+    if !lexeme.starts_with("0x") && !lexeme.starts_with("0X") {
+        return lexeme.parse::<f64>().ok();
+    }
+    let digits = lexeme.get(2..)?;
+    let (mantissa, exponent) = digits
+        .split_once(['p', 'P'])
+        .map_or((digits, 0), |(mantissa, exponent)| {
+            (mantissa, exponent.parse::<i32>().unwrap_or(0))
+        });
+    let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+    let whole = u64::from_str_radix(whole, 16).ok()? as f64;
+    let fraction = fraction
+        .chars()
+        .enumerate()
+        .try_fold(0.0, |value, (index, digit)| {
+            let digit = digit.to_digit(16)? as f64;
+            Some(value + digit * 16.0_f64.powi(-i32::try_from(index + 1).ok()?))
+        })?;
+    Some((whole + fraction) * 2.0_f64.powi(exponent))
 }

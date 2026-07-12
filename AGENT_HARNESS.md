@@ -32,3 +32,4 @@ Security leads are unproven until they identify exact code, attacker-controlled 
 
 - 2026-07-12: Added zero-dependency `rust-harness` binary with `#![forbid(unsafe_code)]`. Proof: `cargo run`, `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` passed.
 - 2026-07-12: Vendored harness workflow, Lua 5.5 manual, all 34 Lua smoke scripts, and `libs/`/`ltests/` fixtures. Rebased parser, lexer, and inventory tests on repo-local paths. Added ignored Rust conformance gate and `scripts/run-upstream-smoke.sh`. Proof: targeted smoke reports 34 expected failures; Rust format, test, Clippy, and security review pass. Next: fix one supported Lua smoke failure per loop iteration.
+- 2026-07-12: Added Lua hexadecimal integer/float literal lowering with compiler regressions. Proof: focused compiler tests, full Rust checks, and smoke improved to 6 pass / 28 fail; `code.lua` and `heavy.lua` now pass. Next: fix one supported runtime failure.

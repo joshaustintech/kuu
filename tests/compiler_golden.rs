@@ -66,6 +66,24 @@ fn simple_arithmetic_and_assignment_compile_to_expected_bytecode() -> Result<(),
 }
 
 #[test]
+fn hexadecimal_integer_and_float_literals_compile() -> Result<(), String> {
+    let integer = compile("return 0xFFFFFFFFFFFFFFFF\n")?;
+    assert!(
+        integer
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::LoadInteger { value: -1, .. }))
+    );
+
+    let float = compile("return 0x1.8p+1\n")?;
+    assert!(float.instructions.iter().any(|instruction| matches!(
+        instruction,
+        Instruction::LoadNumber { value, .. } if (*value - 3.0).abs() < f64::EPSILON
+    )));
+    Ok(())
+}
+
+#[test]
 fn control_flow_compiles_with_patched_jumps() -> Result<(), String> {
     let proto = compile(
         "local x = 0\n\
