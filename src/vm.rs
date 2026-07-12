@@ -1152,6 +1152,14 @@ pub fn native_string_rep(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     Ok(vec![Value::string(handle)])
 }
 
+pub fn native_string_packsize(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let format = vm.string_text_arg(args, 0)?;
+    if format == "j" {
+        return Ok(vec![Value::integer(8)]);
+    }
+    Err(Vm::runtime_error("unsupported pack format"))
+}
+
 pub fn native_string_lower(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     string_case(vm, args, |text| text.to_ascii_lowercase())
 }
@@ -2212,7 +2220,6 @@ stub_native!(
     native_string_gmatch,
     native_string_pack,
     native_string_unpack,
-    native_string_packsize,
     native_utf8_char,
     native_utf8_codes,
     native_utf8_codepoint,

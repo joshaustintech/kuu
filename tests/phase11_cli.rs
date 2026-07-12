@@ -37,6 +37,23 @@ fn global_require_returns_loaded_module() -> Result<(), Box<dyn std::error::Erro
 }
 
 #[test]
+fn string_packsize_reports_lua_integer_width() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec!["-e".to_owned(), "print(string.packsize('j'))".to_owned()],
+        ..RunOptions::default()
+    })?;
+
+    let expected = ExpectedRun {
+        stdout: b"8\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+
+    assert!(compare_run(&actual, &expected).is_ok());
+    Ok(())
+}
+
+#[test]
 fn dash_reads_stdin_and_stops_option_handling() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
         args: vec!["-".to_owned(), "-h".to_owned()],
