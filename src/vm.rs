@@ -3615,24 +3615,24 @@ impl Vm {
     }
 
     fn numeric_add(&self, left: Value, right: Value) -> KResult<Value> {
-        if let Some(value) = self.integer_op(left, right, i64::checked_add) {
-            return value;
+        if let Some(Ok(value)) = self.integer_op(left, right, i64::checked_add) {
+            return Ok(value);
         }
         let (left, right) = self.coerce_numbers(left, right)?;
         Ok(Value::number(left + right))
     }
 
     fn numeric_sub(&self, left: Value, right: Value) -> KResult<Value> {
-        if let Some(value) = self.integer_op(left, right, i64::checked_sub) {
-            return value;
+        if let Some(Ok(value)) = self.integer_op(left, right, i64::checked_sub) {
+            return Ok(value);
         }
         let (left, right) = self.coerce_numbers(left, right)?;
         Ok(Value::number(left - right))
     }
 
     fn numeric_mul(&self, left: Value, right: Value) -> KResult<Value> {
-        if let Some(value) = self.integer_op(left, right, i64::checked_mul) {
-            return value;
+        if let Some(Ok(value)) = self.integer_op(left, right, i64::checked_mul) {
+            return Ok(value);
         }
         let (left, right) = self.coerce_numbers(left, right)?;
         Ok(Value::number(left * right))
