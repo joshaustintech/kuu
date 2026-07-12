@@ -54,17 +54,17 @@ fn load_uses_global_environment_when_env_is_nil() -> Result<(), Box<dyn std::err
 }
 
 #[test]
-fn integer_overflow_promotes_to_float() -> Result<(), Box<dyn std::error::Error>> {
+fn integer_overflow_wraps() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
         args: vec![
             "-e".to_owned(),
-            "print(type(math.maxinteger + 1))".to_owned(),
+            "print(math.type(math.maxinteger + 1), math.maxinteger + 1)".to_owned(),
         ],
         ..RunOptions::default()
     })?;
 
     let expected = ExpectedRun {
-        stdout: b"number\n",
+        stdout: b"integer\t-9223372036854775808\n",
         stderr: b"",
         exit_code: Some(0),
     };

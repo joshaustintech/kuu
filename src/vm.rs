@@ -3615,24 +3615,24 @@ impl Vm {
     }
 
     fn numeric_add(&self, left: Value, right: Value) -> KResult<Value> {
-        if let Some(Ok(value)) = self.integer_op(left, right, i64::checked_add) {
-            return Ok(value);
+        if let (Value::Integer(left), Value::Integer(right)) = (left, right) {
+            return Ok(Value::integer(left.wrapping_add(right)));
         }
         let (left, right) = self.coerce_numbers(left, right)?;
         Ok(Value::number(left + right))
     }
 
     fn numeric_sub(&self, left: Value, right: Value) -> KResult<Value> {
-        if let Some(Ok(value)) = self.integer_op(left, right, i64::checked_sub) {
-            return Ok(value);
+        if let (Value::Integer(left), Value::Integer(right)) = (left, right) {
+            return Ok(Value::integer(left.wrapping_sub(right)));
         }
         let (left, right) = self.coerce_numbers(left, right)?;
         Ok(Value::number(left - right))
     }
 
     fn numeric_mul(&self, left: Value, right: Value) -> KResult<Value> {
-        if let Some(Ok(value)) = self.integer_op(left, right, i64::checked_mul) {
-            return Ok(value);
+        if let (Value::Integer(left), Value::Integer(right)) = (left, right) {
+            return Ok(Value::integer(left.wrapping_mul(right)));
         }
         let (left, right) = self.coerce_numbers(left, right)?;
         Ok(Value::number(left * right))
@@ -3703,25 +3703,6 @@ impl Vm {
             )),
             None,
         ))
-    }
-
-    fn integer_op(
-        &self,
-        left: Value,
-        right: Value,
-        op: fn(i64, i64) -> Option<i64>,
-    ) -> Option<KResult<Value>> {
-        match (left, right) {
-            (Value::Integer(left), Value::Integer(right)) => {
-                Some(op(left, right).map(Value::integer).ok_or_else(|| {
-                    KError::new(
-                        KErrorKind::Runtime("integer arithmetic overflow".to_owned()),
-                        None,
-                    )
-                }))
-            }
-            _ => None,
-        }
     }
 
     fn coerce_numbers(&self, left: Value, right: Value) -> KResult<(f64, f64)> {
