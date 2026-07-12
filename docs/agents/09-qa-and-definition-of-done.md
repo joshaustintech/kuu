@@ -55,7 +55,7 @@ The project is working only when all of the following are true:
 - crate roots forbid unsafe code
 - production code has no forbidden panic or unwrap patterns
 - the parser accepts every local upstream Lua test file
-- supported portions of `/Users/josh/lua-5.5.0-tests` pass
+- supported portions of `tests/upstream/lua-5.5.0-tests` pass
 - the conformance runner emits a deterministic report for all local upstream scripts
 - unsupported C-ABI or dynamic-loading items are documented with exact reasons
 - GC latency tests demonstrate bounded per-step work and heap-size-independent pauses at configured safepoints

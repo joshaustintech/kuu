@@ -13,6 +13,15 @@ surface while keeping the codebase easy to audit and reason about.
 
 Status: active development.
 
+## Local conformance
+
+The Lua 5.5 manual, complete upstream Lua fixture corpus, Rust agent harness,
+and C-facing fixture sources are vendored under this repository. No sibling
+checkout is required. Run `./scripts/run-upstream-smoke.sh` to execute every
+Lua smoke script; failures are expected while implementation proceeds. The
+same gate is available as the ignored Rust test:
+`cargo test --test upstream_smoke -- --ignored`.
+
 Recent progress:
 
 - handle-based GC foundations are in place with incremental step control and

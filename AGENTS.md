@@ -4,9 +4,9 @@ This file is the table of contents for the agent playbook. Do not load every fil
 
 Project targets:
 
-- Spec: `/Users/josh/lua-5.5/doc/manual.html`
-- Tests: `/Users/josh/lua-5.5.0-tests`
-- Harness entrypoint: `/Users/josh/lua-5.5.0-tests/all.lua`
+- Spec: `docs/spec/lua-5.5/manual.html`
+- Tests: `tests/upstream/lua-5.5.0-tests`
+- Harness entrypoint: `tests/upstream/lua-5.5.0-tests/all.lua`
 
 ## Default Orchestration
 

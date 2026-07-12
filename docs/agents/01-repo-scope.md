@@ -4,9 +4,9 @@ This project is a clean-room Lua 5.5 implementation in Rust.
 
 Source of truth:
 
-- Manual: `/Users/josh/lua-5.5/doc/manual.html`
-- Tests: `/Users/josh/lua-5.5.0-tests`
-- Test harness: `/Users/josh/lua-5.5.0-tests/all.lua`
+- Manual: `docs/spec/lua-5.5/manual.html`
+- Tests: `tests/upstream/lua-5.5.0-tests`
+- Test harness: `tests/upstream/lua-5.5.0-tests/all.lua`
 
 Manual sections that matter most:
 

@@ -14,7 +14,7 @@ fn tokenize_all(source: &str) -> Result<(), Box<dyn std::error::Error>> {
 
 #[test]
 fn local_upstream_scripts_tokenize() -> Result<(), Box<dyn std::error::Error>> {
-    let root = Path::new("/Users/josh/lua-5.5.0-tests");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/upstream/lua-5.5.0-tests");
     for entry in fs::read_dir(root)? {
         let entry = entry?;
         let path = entry.path();

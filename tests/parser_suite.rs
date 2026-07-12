@@ -4,7 +4,7 @@ use std::path::Path;
 
 #[test]
 fn all_upstream_lua_fixtures_parse() -> Result<(), String> {
-    let root = Path::new("/Users/josh/lua-5.5.0-tests");
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/upstream/lua-5.5.0-tests");
     let mut entries = Vec::new();
 
     for entry in fs::read_dir(root).map_err(|error| error.to_string())? {

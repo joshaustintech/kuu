@@ -45,7 +45,7 @@ Done when:
 
 Subtask 1.2 prompt:
 ```text
-Add a conformance inventory test that lists /Users/josh/lua-5.5.0-tests/*.lua, assigns each file to a target phase, and fails if a local upstream test is unclassified.
+Add a conformance inventory test that lists `tests/upstream/lua-5.5.0-tests/*.lua`, assigns each file to a target phase, and fails if a local upstream test is unclassified.
 ```
 
 Done when:

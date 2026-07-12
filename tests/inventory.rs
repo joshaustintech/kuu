@@ -98,8 +98,8 @@ fn collect_inventory(root: &Path) -> Result<Vec<InventoryRow>, io::Error> {
 
 #[test]
 fn all_upstream_lua_scripts_are_classified() -> Result<(), Box<dyn std::error::Error>> {
-    let root = Path::new("/Users/josh/lua-5.5.0-tests");
-    let rows = collect_inventory(root)?;
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/upstream/lua-5.5.0-tests");
+    let rows = collect_inventory(&root)?;
 
     let expected_count = 34;
     assert_eq!(rows.len(), expected_count);
