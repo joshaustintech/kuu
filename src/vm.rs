@@ -3986,13 +3986,35 @@ impl Vm {
                 let Some(text) = std::str::from_utf8(bytes).ok() else {
                     return Ok(None);
                 };
-                match text.parse::<i64>() {
+                match Self::parse_integer_text(text) {
                     Ok(value) => Ok(Some(value)),
                     Err(_) => Ok(None),
                 }
             }
             _ => Ok(None),
         }
+    }
+
+    fn parse_integer_text(text: &str) -> Result<i64, ()> {
+        let text = text.trim();
+        let (negative, digits) = match text.strip_prefix('-') {
+            Some(value) => (true, value),
+            None => (false, text.strip_prefix('+').unwrap_or(text)),
+        };
+        let value = if let Some(hex) = digits
+            .strip_prefix("0x")
+            .or_else(|| digits.strip_prefix("0X"))
+        {
+            let raw = u64::from_str_radix(hex, 16).map_err(|_| ())?;
+            i64::from_ne_bytes(raw.to_ne_bytes())
+        } else {
+            digits.parse::<i64>().map_err(|_| ())?
+        };
+        Ok(if negative {
+            value.wrapping_neg()
+        } else {
+            value
+        })
     }
 
     fn bitwise_shift_left(left: i64, right: i64) -> i64 {

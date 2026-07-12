@@ -54,6 +54,26 @@ fn string_packsize_reports_lua_integer_width() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
+fn bitwise_coerces_hex_integer_strings() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "print('0xffffffffffffffff' | 0)".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+
+    let expected = ExpectedRun {
+        stdout: b"-1\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+
+    assert!(compare_run(&actual, &expected).is_ok());
+    Ok(())
+}
+
+#[test]
 fn dash_reads_stdin_and_stops_option_handling() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
         args: vec!["-".to_owned(), "-h".to_owned()],
