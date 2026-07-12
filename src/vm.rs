@@ -5030,6 +5030,7 @@ impl Vm {
         self.set_global_native(b"next", native_next)?;
         self.set_global_native(b"print", native_print)?;
         self.set_global_native(b"collectgarbage", native_collectgarbage)?;
+        self.set_global_native(b"require", native_require)?;
         Ok(())
     }
 

@@ -20,6 +20,23 @@ fn stdin_is_executed_as_a_file_without_arguments() -> Result<(), Box<dyn std::er
 }
 
 #[test]
+fn global_require_returns_loaded_module() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec!["-e".to_owned(), "print(require('math').abs(-2))".to_owned()],
+        ..RunOptions::default()
+    })?;
+
+    let expected = ExpectedRun {
+        stdout: b"2\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+
+    assert!(compare_run(&actual, &expected).is_ok());
+    Ok(())
+}
+
+#[test]
 fn dash_reads_stdin_and_stops_option_handling() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
         args: vec!["-".to_owned(), "-h".to_owned()],
