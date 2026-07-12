@@ -80,6 +80,8 @@ fn hexadecimal_integer_and_float_literals_compile() -> Result<(), String> {
         instruction,
         Instruction::LoadNumber { value, .. } if (*value - 3.0).abs() < f64::EPSILON
     )));
+
+    compile("return 0x.0p-3\n")?;
     Ok(())
 }
 

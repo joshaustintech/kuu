@@ -1695,7 +1695,11 @@ fn parse_number_literal(lexeme: &str) -> Option<f64> {
             (mantissa, exponent.parse::<i32>().unwrap_or(0))
         });
     let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-    let whole = u64::from_str_radix(whole, 16).ok()? as f64;
+    let whole = if whole.is_empty() {
+        0.0
+    } else {
+        u64::from_str_radix(whole, 16).ok()? as f64
+    };
     let fraction = fraction
         .chars()
         .enumerate()

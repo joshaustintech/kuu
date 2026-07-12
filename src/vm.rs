@@ -5097,6 +5097,7 @@ impl Vm {
         self.set_module_function(table, b"floor", native_math_floor)?;
         self.set_module_function(table, b"fmod", native_math_fmod)?;
         self.set_module_function(table, b"frexp", native_math_frexp)?;
+        self.set_module_function(table, b"ldexp", native_math_ldexp)?;
         self.set_module_function(table, b"max", native_math_max)?;
         self.set_module_function(table, b"min", native_math_min)?;
         self.set_module_function(table, b"log", native_math_log)?;
