@@ -58,13 +58,13 @@ fn bitwise_coerces_hex_integer_strings() -> Result<(), Box<dyn std::error::Error
     let actual = run_binary_with(RunOptions {
         args: vec![
             "-e".to_owned(),
-            "print('0xffffffffffffffff' | 0)".to_owned(),
+            "print('0xffffffffffffffff' | 0, '1234.0' << '5.0', '0xffff.0' ~ '0xAAAA', ~'0x0.000p4')".to_owned(),
         ],
         ..RunOptions::default()
     })?;
 
     let expected = ExpectedRun {
-        stdout: b"-1\n",
+        stdout: b"-1\t39488\t21845\t-1\n",
         stderr: b"",
         exit_code: Some(0),
     };

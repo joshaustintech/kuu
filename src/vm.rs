@@ -4005,16 +4005,55 @@ impl Vm {
             .strip_prefix("0x")
             .or_else(|| digits.strip_prefix("0X"))
         {
-            let raw = u64::from_str_radix(hex, 16).map_err(|_| ())?;
-            i64::from_ne_bytes(raw.to_ne_bytes())
+            if hex.contains(['.', 'p', 'P']) {
+                let number = Self::parse_hex_number_text(hex).ok_or(())?;
+                if !number.is_finite() || number.fract() != 0.0 {
+                    return Err(());
+                }
+                number as i64
+            } else {
+                let raw = u64::from_str_radix(hex, 16).map_err(|_| ())?;
+                i64::from_ne_bytes(raw.to_ne_bytes())
+            }
         } else {
-            digits.parse::<i64>().map_err(|_| ())?
+            match digits.parse::<i64>() {
+                Ok(value) => value,
+                Err(_) => {
+                    let number = digits.parse::<f64>().map_err(|_| ())?;
+                    if !number.is_finite() || number.fract() != 0.0 {
+                        return Err(());
+                    }
+                    number as i64
+                }
+            }
         };
         Ok(if negative {
             value.wrapping_neg()
         } else {
             value
         })
+    }
+
+    fn parse_hex_number_text(text: &str) -> Option<f64> {
+        let (mantissa, exponent) = text
+            .split_once(['p', 'P'])
+            .map_or((text, 0), |(mantissa, exponent)| {
+                (mantissa, exponent.parse::<i32>().unwrap_or(0))
+            });
+        let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
+        let whole = if whole.is_empty() {
+            0.0
+        } else {
+            u64::from_str_radix(whole, 16).ok()? as f64
+        };
+        let fraction = fraction
+            .chars()
+            .enumerate()
+            .try_fold(0.0, |value, (index, digit)| {
+                let digit = digit.to_digit(16)? as f64;
+                Some(value + digit * 16.0_f64.powi(-i32::try_from(index + 1).ok()?))
+            })?;
+        Some((whole + fraction) * 2.0_f64.powi(exponent))
     }
 
     fn bitwise_shift_left(left: i64, right: i64) -> i64 {
