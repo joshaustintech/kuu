@@ -458,7 +458,7 @@ impl<'a> FunctionCompiler<'a> {
         step: Option<&Expr>,
         block: &Block,
     ) -> KResult<()> {
-        let loop_slot = self.find_loop_slot(name)?;
+        let loop_slot = self.find_loop_slot(name, block.span)?;
         let loop_reg = Register::new(loop_slot);
         let start_reg = self.compile_expr_result(start)?;
         let end_reg = self.compile_expr_result(end)?;
@@ -481,7 +481,7 @@ impl<'a> FunctionCompiler<'a> {
             left: step_reg,
             right: zero_reg,
         });
-        let negative_jump = self.emit_conditional_jump(false, negative_reg);
+        let negative_jump = self.emit_conditional_jump(true, negative_reg);
 
         let positive_cond = self.alloc_temp()?;
         self.instructions.push(Instruction::Compare {
@@ -1409,11 +1409,15 @@ impl<'a> FunctionCompiler<'a> {
             .ok_or_else(|| KError::bytecode(format!("missing declaration slot for '{name}'")))
     }
 
-    fn find_loop_slot(&self, name: &str) -> KResult<u16> {
+    fn find_loop_slot(&self, name: &str, span: KSpan) -> KResult<u16> {
         self.resolved
             .declarations
             .iter()
-            .find(|record| record.name == name && matches!(record.kind, DeclarationKind::Local))
+            .find(|record| {
+                record.name == name
+                    && record.span == span
+                    && matches!(record.kind, DeclarationKind::Local)
+            })
             .map(|record| {
                 u16::try_from(record.slot)
                     .map_err(|_| KError::bytecode("loop variable slot exceeds u16"))
