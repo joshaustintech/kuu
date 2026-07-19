@@ -548,6 +548,7 @@ impl<'a> FunctionCompiler<'a> {
         });
         self.compile_block(block, false)?;
         let cond_reg = self.compile_expr_result(condition)?;
+        self.emit_close_for_block_locals(block);
         let exit_jump = self.emit_conditional_jump(false, cond_reg);
         self.patch_jump(exit_jump, loop_start)?;
         self.patch_loop_breaks(self.instructions.len())?;
@@ -1891,6 +1892,25 @@ impl<'a> FunctionCompiler<'a> {
             .iter()
             .filter_map(|frame| frame.min_close_slot)
             .min()
+    }
+
+    fn emit_close_for_block_locals(&mut self, block: &Block) {
+        let slot = self
+            .resolved
+            .declarations
+            .iter()
+            .filter(|record| {
+                matches!(record.kind, DeclarationKind::Local)
+                    && record.span.start_line >= block.span.start_line
+                    && record.span.end_line <= block.span.end_line
+            })
+            .filter_map(|record| u16::try_from(record.slot).ok())
+            .min();
+        if let Some(slot) = slot {
+            self.instructions.push(Instruction::Close {
+                from: Register::new(slot),
+            });
+        }
     }
 
     fn record_close_slot(&mut self, slot: usize) {

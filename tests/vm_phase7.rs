@@ -402,6 +402,24 @@ fn weak_values_clear_during_statement_safepoints() -> Result<(), Box<dyn std::er
 }
 
 #[test]
+fn repeat_loop_closures_keep_iteration_locals() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local a, i = {}, 1; repeat local x = i; a[i] = function () return x end; i = i + 1 until i > 3; print(a[1](), a[2](), a[3]())".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"1\t2\t3\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn math_fmod_preserves_float_result_for_float_input() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
         args: vec![
