@@ -4272,6 +4272,9 @@ impl Vm {
 
     fn parse_integer_text(text: &str) -> Result<i64, ()> {
         let text = text.trim();
+        if let Ok(value) = text.parse::<i64>() {
+            return Ok(value);
+        }
         let (negative, digits) = match text.strip_prefix('-') {
             Some(value) => (true, value),
             None => (false, text.strip_prefix('+').unwrap_or(text)),

@@ -95,6 +95,24 @@ fn math_rounding_preserves_integer_inputs() -> Result<(), Box<dyn std::error::Er
 }
 
 #[test]
+fn math_tointeger_parses_mininteger_text() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "print(math.tointeger(math.mininteger .. '') == math.mininteger)".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"true\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn unary_minus_preserves_integer_type_and_wraps_minimum() -> Result<(), Box<dyn std::error::Error>>
 {
     let actual = run_binary_with(RunOptions {
