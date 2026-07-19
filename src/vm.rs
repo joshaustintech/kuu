@@ -1064,6 +1064,23 @@ pub fn native_table_unpack(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     Ok(values)
 }
 
+pub fn native_table_pack(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let table = vm.new_table_handle()?;
+    let length = i64::try_from(args.len())
+        .map_err(|_| Vm::runtime_error("table.pack argument count overflow"))?;
+    let n_key = vm.heap.intern_string(b"n".to_vec())?;
+    let table_value = Value::table(table);
+    for (offset, value) in args.iter().copied().enumerate() {
+        let index = i64::try_from(offset)
+            .map_err(|_| Vm::runtime_error("table.pack index overflow"))?
+            .checked_add(1)
+            .ok_or_else(|| Vm::runtime_error("table.pack index overflow"))?;
+        vm.table_set(table_value, Value::integer(index), value)?;
+    }
+    vm.table_set(table_value, Value::string(n_key), Value::integer(length))?;
+    Ok(vec![table_value])
+}
+
 pub fn native_string_dump(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     let closure = match vm.arg_or_nil(args, 0) {
         Value::Closure(handle) => handle,
@@ -2568,7 +2585,6 @@ stub_native!(
     native_table_insert,
     native_table_remove,
     native_table_move,
-    native_table_pack,
     native_table_sort,
     native_io_lines,
     native_package_loadlib,

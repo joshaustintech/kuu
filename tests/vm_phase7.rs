@@ -595,6 +595,26 @@ fn coroutine_create_resume_returns_values_and_marks_dead() -> Result<(), Box<dyn
 }
 
 #[test]
+fn table_pack_preserves_nil_positions_and_explicit_length() -> Result<(), Box<dyn std::error::Error>>
+{
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local values = table.pack('a', nil, 'c'); local a, b, c = table.unpack(values, 1, values.n); print(values.n, a, b == nil, c)"
+                .to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"3\ta\ttrue\tc\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn table_concat_joins_range_with_separator() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
         args: vec![
