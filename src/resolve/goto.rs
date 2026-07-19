@@ -1,21 +1,26 @@
 use crate::ast::{Block, Expr, FunctionBody, Stmt, TableField, Var, VarKind};
 use crate::error::{KError, KResult, KSpan};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Debug, Clone)]
 pub struct Resolver;
 
 #[derive(Debug, Clone, Copy)]
 struct LocalLabel {
-    span: KSpan,
     stmt_index: usize,
+}
+
+#[derive(Debug, Clone)]
+struct LabelContext {
+    active_scopes: BTreeSet<String>,
 }
 
 #[derive(Debug)]
 struct BlockFrame<'a> {
     block: &'a Block,
-    known_labels: BTreeMap<String, KSpan>,
-    visible_labels: BTreeMap<String, KSpan>,
+    known_labels: BTreeMap<String, LabelContext>,
+    visible_labels: BTreeMap<String, LabelContext>,
+    active_scopes: BTreeSet<String>,
 }
 
 impl Resolver {
@@ -24,6 +29,7 @@ impl Resolver {
             block: &chunk.block,
             known_labels: BTreeMap::new(),
             visible_labels: BTreeMap::new(),
+            active_scopes: BTreeSet::new(),
         }];
 
         while let Some(frame) = stack.pop() {
@@ -35,7 +41,6 @@ impl Resolver {
 
     fn resolve_block<'a>(frame: BlockFrame<'a>, stack: &mut Vec<BlockFrame<'a>>) -> KResult<()> {
         let mut local_labels = BTreeMap::<String, LocalLabel>::new();
-        let mut declaration_indices = Vec::<usize>::new();
 
         for (stmt_index, stmt) in frame.block.statements.iter().enumerate() {
             if let Some((name, span)) = Self::label_from_stmt(stmt) {
@@ -44,22 +49,27 @@ impl Resolver {
                         if frame.visible_labels.contains_key(&name) {
                             return Err(Self::duplicate_label_error(name, span));
                         }
-                        entry.insert(LocalLabel { span, stmt_index });
+                        entry.insert(LocalLabel { stmt_index });
                     }
                     std::collections::btree_map::Entry::Occupied(_) => {
                         return Err(Self::duplicate_label_error(name, span));
                     }
                 }
             }
-
-            if Self::stmt_declares_scope(stmt) {
-                declaration_indices.push(stmt_index);
-            }
         }
 
         let mut known_labels = frame.known_labels.clone();
         for (name, label) in &local_labels {
-            known_labels.insert(name.clone(), label.span);
+            known_labels.insert(
+                name.clone(),
+                LabelContext {
+                    active_scopes: Self::active_scopes_at(
+                        &frame.active_scopes,
+                        label.stmt_index,
+                        frame.block,
+                    ),
+                },
+            );
         }
 
         let mut children = Vec::<BlockFrame<'a>>::new();
@@ -72,18 +82,28 @@ impl Resolver {
                     stmt_index,
                     &local_labels,
                     &frame.known_labels,
-                    &declaration_indices,
+                    &frame.active_scopes,
                     frame.block,
                 )?;
             }
 
             let mut visible_labels = frame.visible_labels.clone();
             for (name, label) in &local_labels {
-                if label.stmt_index < stmt_index {
-                    visible_labels.insert(name.clone(), label.span);
+                if label.stmt_index < stmt_index
+                    && let Some(label) = known_labels.get(name)
+                {
+                    visible_labels.insert(name.clone(), label.clone());
                 }
             }
-            Self::collect_stmt_children(stmt, &known_labels, &visible_labels, &mut children)?;
+            let active_scopes =
+                Self::active_scopes_at(&frame.active_scopes, stmt_index, frame.block);
+            Self::collect_stmt_children(
+                stmt,
+                &known_labels,
+                &visible_labels,
+                active_scopes,
+                &mut children,
+            )?;
         }
 
         if let Some(return_stmt) = &frame.block.return_stmt {
@@ -104,8 +124,8 @@ impl Resolver {
         name: &str,
         goto_index: usize,
         local_labels: &BTreeMap<String, LocalLabel>,
-        known_labels: &BTreeMap<String, KSpan>,
-        declaration_indices: &[usize],
+        known_labels: &BTreeMap<String, LabelContext>,
+        active_scopes: &BTreeSet<String>,
         block: &Block,
     ) -> KResult<()> {
         if let Some(local_label) = local_labels.get(name) {
@@ -115,53 +135,102 @@ impl Resolver {
                 .skip(local_label.stmt_index.saturating_add(1))
                 .all(|stmt| matches!(stmt, Stmt::Empty { .. } | Stmt::Label { .. }));
             if local_label.stmt_index > goto_index
-                && Self::crosses_scope(goto_index, local_label.stmt_index, declaration_indices)
+                && Self::crosses_scope(goto_index, local_label.stmt_index, block)
                 && !(ends_block
-                    && Self::only_skips_terminal_plain_locals(
-                        goto_index,
-                        local_label.stmt_index,
-                        block,
-                    ))
+                    && Self::only_skips_terminal_locals(goto_index, local_label.stmt_index, block))
             {
-                return Err(Self::scope_crossing_error(goto_span, name));
+                let scope_name =
+                    Self::first_crossed_declaration_name(goto_index, local_label.stmt_index, block)
+                        .unwrap_or("declaration");
+                return Err(Self::scope_crossing_error(goto_span, name, scope_name));
             }
             return Ok(());
         }
 
-        if known_labels.contains_key(name) {
+        if let Some(label) = known_labels.get(name) {
+            if let Some(scope_name) = label.active_scopes.difference(active_scopes).next() {
+                return Err(Self::scope_crossing_error(goto_span, name, scope_name));
+            }
             return Ok(());
         }
 
         Err(Self::unknown_label_error(goto_span, name))
     }
 
-    fn crosses_scope(goto_index: usize, label_index: usize, declaration_indices: &[usize]) -> bool {
-        declaration_indices
+    fn crosses_scope(goto_index: usize, label_index: usize, block: &Block) -> bool {
+        block
+            .statements
             .iter()
-            .any(|index| *index > goto_index && *index < label_index)
+            .enumerate()
+            .any(|(index, statement)| {
+                index > goto_index && index < label_index && Self::stmt_declares_scope(statement)
+            })
     }
 
-    fn only_skips_terminal_plain_locals(
-        goto_index: usize,
-        label_index: usize,
-        block: &Block,
-    ) -> bool {
+    fn only_skips_terminal_locals(goto_index: usize, label_index: usize, block: &Block) -> bool {
         block
             .statements
             .iter()
             .enumerate()
             .filter(|(index, _)| *index > goto_index && *index < label_index)
             .filter(|(_, statement)| Self::stmt_declares_scope(statement))
-            .all(|(_, statement)| match statement {
-                Stmt::LocalDecl {
-                    prefix_attribute,
-                    names,
-                    ..
-                } => {
-                    prefix_attribute.is_none() && names.iter().all(|name| name.attribute.is_none())
-                }
-                _ => false,
+            .all(|(_, statement)| {
+                matches!(
+                    statement,
+                    Stmt::LocalDecl { .. } | Stmt::LocalFunction { .. }
+                )
             })
+    }
+
+    fn first_crossed_declaration_name(
+        goto_index: usize,
+        label_index: usize,
+        block: &Block,
+    ) -> Option<&str> {
+        block
+            .statements
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index > goto_index && *index < label_index)
+            .find_map(|(_, statement)| match statement {
+                Stmt::LocalDecl { names, .. } | Stmt::GlobalDecl { names, .. } => {
+                    names.first().map(|name| name.name.as_str())
+                }
+                Stmt::LocalFunction { name, .. } | Stmt::GlobalFunction { name, .. } => {
+                    Some(name.as_str())
+                }
+                Stmt::GlobalAll { .. } => Some("*"),
+                Stmt::NumericFor { name, .. } => Some(name.as_str()),
+                Stmt::GenericFor { names, .. } => names.first().map(String::as_str),
+                _ => None,
+            })
+    }
+
+    fn active_scopes_at(
+        inherited: &BTreeSet<String>,
+        stmt_index: usize,
+        block: &Block,
+    ) -> BTreeSet<String> {
+        let mut active = inherited.clone();
+        for statement in block.statements.iter().take(stmt_index) {
+            active.extend(Self::stmt_scope_names(statement));
+        }
+        active
+    }
+
+    fn stmt_scope_names(statement: &Stmt) -> Vec<String> {
+        match statement {
+            Stmt::LocalDecl { names, .. } | Stmt::GlobalDecl { names, .. } => {
+                names.iter().map(|name| name.name.clone()).collect()
+            }
+            Stmt::LocalFunction { name, .. } | Stmt::GlobalFunction { name, .. } => {
+                vec![name.clone()]
+            }
+            Stmt::GlobalAll { .. } => vec!["*".to_owned()],
+            Stmt::NumericFor { name, .. } => vec![name.clone()],
+            Stmt::GenericFor { names, .. } => names.clone(),
+            _ => Vec::new(),
+        }
     }
 
     fn stmt_declares_scope(stmt: &Stmt) -> bool {
@@ -192,17 +261,18 @@ impl Resolver {
         KError::syntax(format!("goto references unknown label '{}'", name), span)
     }
 
-    fn scope_crossing_error(span: KSpan, name: &str) -> KError {
+    fn scope_crossing_error(span: KSpan, name: &str, scope_name: &str) -> KError {
         KError::syntax(
-            format!("goto '{}' would enter the scope of a declaration", name),
+            format!("goto '{}' would enter the scope of '{}'", name, scope_name),
             span,
         )
     }
 
     fn collect_stmt_children<'a>(
         stmt: &'a Stmt,
-        known_labels: &BTreeMap<String, KSpan>,
-        visible_labels: &BTreeMap<String, KSpan>,
+        known_labels: &BTreeMap<String, LabelContext>,
+        visible_labels: &BTreeMap<String, LabelContext>,
+        active_scopes: BTreeSet<String>,
         children: &mut Vec<BlockFrame<'a>>,
     ) -> KResult<()> {
         match stmt {
@@ -215,6 +285,7 @@ impl Resolver {
                     block,
                     known_labels: known_labels.clone(),
                     visible_labels: visible_labels.clone(),
+                    active_scopes: active_scopes.clone(),
                 });
             }
             Stmt::If {
@@ -227,6 +298,7 @@ impl Resolver {
                         block,
                         known_labels: known_labels.clone(),
                         visible_labels: visible_labels.clone(),
+                        active_scopes: active_scopes.clone(),
                     });
                 }
                 for (_, block) in branches.iter().rev() {
@@ -234,6 +306,7 @@ impl Resolver {
                         block,
                         known_labels: known_labels.clone(),
                         visible_labels: visible_labels.clone(),
+                        active_scopes: active_scopes.clone(),
                     });
                 }
             }
@@ -275,7 +348,7 @@ impl Resolver {
 
     fn collect_var_children<'a>(
         var: &'a Var,
-        visible_labels: &BTreeMap<String, KSpan>,
+        visible_labels: &BTreeMap<String, LabelContext>,
         children: &mut Vec<BlockFrame<'a>>,
     ) -> KResult<()> {
         match &var.kind {
@@ -292,7 +365,7 @@ impl Resolver {
 
     fn collect_expr_children<'a>(
         expr: &'a Expr,
-        visible_labels: &BTreeMap<String, KSpan>,
+        visible_labels: &BTreeMap<String, LabelContext>,
         children: &mut Vec<BlockFrame<'a>>,
     ) -> KResult<()> {
         let mut stack = vec![expr];
@@ -352,6 +425,7 @@ impl Resolver {
             block: &body.block,
             known_labels: BTreeMap::new(),
             visible_labels: BTreeMap::new(),
+            active_scopes: BTreeSet::new(),
         });
     }
 }

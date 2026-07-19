@@ -41,12 +41,25 @@ fn rejects_goto_that_enters_global_scope() -> Result<(), String> {
 
 #[test]
 fn rejects_goto_that_enters_to_be_closed_scope() -> Result<(), String> {
-    let error = match resolve("goto done\nlocal x<close> = 1\n::done::\n") {
+    let error = match resolve("goto done\nlocal x<close> = 1\n::done::\nprint(x)\n") {
         Ok(()) => return Err("expected to-be-closed scope error".to_string()),
         Err(error) => error,
     };
     assert!(
         error.contains("enter the scope"),
+        "unexpected error: {error}"
+    );
+    Ok(())
+}
+
+#[test]
+fn rejects_nested_goto_that_enters_outer_scope() -> Result<(), String> {
+    let error = match resolve("do goto done end\nlocal value\n::done::\n") {
+        Ok(()) => return Err("expected scope error".to_string()),
+        Err(error) => error,
+    };
+    assert!(
+        error.contains("scope of 'value'"),
         "unexpected error: {error}"
     );
     Ok(())
