@@ -769,7 +769,11 @@ pub fn native_pcall(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
             Ok(out)
         }
         Err(error) => {
-            let message = vm.heap.intern_string(error.to_string().into_bytes())?;
+            let text = match error.kind() {
+                KErrorKind::Runtime(message) => message.clone(),
+                _ => error.to_string(),
+            };
+            let message = vm.heap.intern_string(text.into_bytes())?;
             Ok(vec![Value::boolean(false), Value::string(message)])
         }
     }

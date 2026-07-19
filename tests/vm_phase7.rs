@@ -382,7 +382,26 @@ fn require_lists_path_and_cpath_candidates() -> Result<(), Box<dyn std::error::E
         ..RunOptions::default()
     })?;
     let expected = ExpectedRun {
-        stdout: b"false\truntime error: module 'XXX' not found:\n\tno field package.preload['XXX']\n\tno file 'XXX.lua'\n\tno file 'XXX/XXX'\n\tno file 'XXX.so'\n\tno file 'XXX/init'\n",
+        stdout: b"false\tmodule 'XXX' not found:\n\tno field package.preload['XXX']\n\tno file 'XXX.lua'\n\tno file 'XXX/XXX'\n\tno file 'XXX.so'\n\tno file 'XXX/init'\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
+fn pcall_returns_raw_runtime_message() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local ok, message = pcall(require, 'missing-module'); print(ok, string.find(message, 'runtime error') == nil)"
+                .to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"false\ttrue\n",
         stderr: b"",
         exit_code: Some(0),
     };
