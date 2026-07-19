@@ -978,6 +978,27 @@ pub fn native_table_concat(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     Ok(vec![Value::string(handle)])
 }
 
+pub fn native_table_unpack(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let table = vm.table_arg(args, 0, "table expected")?;
+    let start = match vm.arg_or_nil(args, 1) {
+        Value::Nil => 1,
+        _ => vm.integer_arg(args, 1, "integer expected")?,
+    };
+    let end = match vm.arg_or_nil(args, 2) {
+        Value::Nil => i64::try_from(vm.heap.resolve_table(table)?.array.len()).unwrap_or(i64::MAX),
+        _ => vm.integer_arg(args, 2, "integer expected")?,
+    };
+    let mut values = Vec::new();
+    for index in start..=end {
+        values.push(
+            vm.heap
+                .resolve_table(table)?
+                .raw_get(Value::integer(index))?,
+        );
+    }
+    Ok(values)
+}
+
 pub fn native_string_dump(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     let closure = match vm.arg_or_nil(args, 0) {
         Value::Closure(handle) => handle,
@@ -2441,7 +2462,6 @@ stub_native!(
     native_table_remove,
     native_table_move,
     native_table_pack,
-    native_table_unpack,
     native_table_sort,
     native_io_lines,
     native_package_loadlib,
@@ -5604,6 +5624,7 @@ impl Vm {
         self.set_global_value(b"_G", Value::table(self.globals))?;
         let version = self.heap.intern_string(b"Lua 5.5".to_vec())?;
         self.set_global_value(b"_VERSION", Value::string(version))?;
+        self.set_global_value(b"_port", Value::boolean(true))?;
 
         self.set_global_native(b"assert", native_assert)?;
         self.set_global_native(b"error", native_error)?;

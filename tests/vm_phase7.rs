@@ -410,6 +410,24 @@ fn pcall_returns_raw_runtime_message() -> Result<(), Box<dyn std::error::Error>>
 }
 
 #[test]
+fn portable_mode_and_table_unpack_are_available() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local a, b = table.unpack({'a', 'b'}); print(_port, a, b)".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"true\ta\tb\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn literal_integer_floor_division_by_zero_errors_when_called()
 -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
