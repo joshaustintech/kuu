@@ -2842,11 +2842,6 @@ pub fn native_debug_setupvalue(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value
         None => return Ok(vec![Value::nil()]),
     };
     vm.heap.set_upvalue_value(handle, &mut vm.stack, value)?;
-    if index == 2
-        && let Some(first) = vm.heap.resolve_closure(closure)?.upvalues.first().copied()
-    {
-        vm.heap.set_upvalue_value(first, &mut vm.stack, value)?;
-    }
     let name: &[u8] = if index == 2 { b"_ENV" } else { b"(*temporary)" };
     Ok(vec![Value::string(vm.heap.intern_string(name.to_vec())?)])
 }
