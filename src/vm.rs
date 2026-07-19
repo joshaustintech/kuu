@@ -5624,7 +5624,8 @@ impl Vm {
                     KErrorKind::Runtime("binary chunk header truncated".to_owned()),
                     None,
                 )
-            })?)?
+            })?)
+            .map_err(|_| Vm::runtime_error("truncated binary chunk"))?
         } else {
             let source = std::str::from_utf8(bytes).map_err(|_| {
                 KError::new(
