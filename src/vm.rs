@@ -2835,6 +2835,7 @@ pub struct Vm {
     gc_phase: GcPhase,
     gc_gray_tables: Vec<TableHandle>,
     gc_gray_closures: Vec<ClosureHandle>,
+    gc_marked_closures: BTreeSet<ClosureHandle>,
     gc_sweep_cursor: usize,
     gc_finalize_queue: Vec<TableHandle>,
     gc_metrics: GcMetrics,
@@ -2868,6 +2869,7 @@ impl Vm {
             gc_phase: GcPhase::Pause,
             gc_gray_tables: Vec::new(),
             gc_gray_closures: Vec::new(),
+            gc_marked_closures: BTreeSet::new(),
             gc_sweep_cursor: 0,
             gc_finalize_queue: Vec::new(),
             gc_metrics: GcMetrics::default(),
@@ -5792,6 +5794,7 @@ impl Vm {
         self.gc_phase = GcPhase::Mark;
         self.gc_gray_tables.clear();
         self.gc_gray_closures.clear();
+        self.gc_marked_closures.clear();
         self.gc_sweep_cursor = 0;
         self.gc_finalize_queue.clear();
         for table in self.heap.tables.iter_mut().flatten() {
@@ -5850,6 +5853,9 @@ impl Vm {
     }
 
     fn gc_mark_closure(&mut self, handle: ClosureHandle) {
+        if !self.gc_marked_closures.insert(handle) {
+            return;
+        }
         let index = match usize::try_from(handle.raw()) {
             Ok(index) => index,
             Err(_) => return,

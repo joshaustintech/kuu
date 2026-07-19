@@ -751,6 +751,26 @@ fn load_accepts_a_chunk_reader_function() -> Result<(), Box<dyn std::error::Erro
 }
 
 #[test]
+fn collectgarbage_terminates_on_unreachable_closure_cycles()
+-> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local f; f = function() return f end; f = nil; collectgarbage(); print('ok')"
+                .to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"ok\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn table_concat_joins_range_with_separator() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
         args: vec![
