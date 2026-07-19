@@ -28,6 +28,10 @@ impl Compiler {
         let mut compiler =
             FunctionCompiler::new(&resolved.root, None, chunk.block.span, true, 0, false)?;
         compiler.compile_block(&chunk.block, true)?;
+        compiler.vararg = compiler
+            .instructions
+            .iter()
+            .any(|instruction| matches!(instruction, Instruction::Vararg { .. }));
         compiler.finish(Some(b"chunk".to_vec()))
     }
 }
