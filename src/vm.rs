@@ -1794,7 +1794,7 @@ pub fn native_math_frexp(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
         (normalized, exp)
     } else {
         let exp = exponent_bits - 1022;
-        let mantissa_bits = mantissa_bits | (0x3feu64 << 52);
+        let mantissa_bits = (bits & (1u64 << 63)) | mantissa_bits | (0x3feu64 << 52);
         (f64::from_bits(mantissa_bits), exp)
     };
     Ok(vec![

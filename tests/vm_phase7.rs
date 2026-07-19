@@ -442,6 +442,25 @@ fn floating_modulo_keeps_high_power_precision_and_nan_zero_divisor()
 }
 
 #[test]
+fn frexp_preserves_negative_mantissa_sign() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local m, p = math.frexp(-math.pi); print(m < 0, math.ldexp(m, p) == -math.pi)"
+                .to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"true\ttrue\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn prints_the_hello_fixture() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary(&fixture_path("hello.lua"))?;
     let expected = ExpectedRun {
