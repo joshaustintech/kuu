@@ -711,6 +711,9 @@ pub fn native_tonumber(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
             match std::str::from_utf8(&bytes) {
                 Ok(text) => {
                     let text = text.trim();
+                    if matches!(text.to_ascii_lowercase().as_str(), "inf" | "nan") {
+                        return Ok(vec![Value::nil()]);
+                    }
                     let (negative, digits) = match text.strip_prefix('-') {
                         Some(value) => (true, value),
                         None => (false, text.strip_prefix('+').unwrap_or(text)),
@@ -829,8 +832,13 @@ pub fn native_load(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
         Value::Nil => None,
         value => Some(value),
     };
-    let closure = vm.load_chunk_bytes(&source, mode.as_deref(), env)?;
-    Ok(vec![Value::closure(closure)])
+    match vm.load_chunk_bytes(&source, mode.as_deref(), env) {
+        Ok(closure) => Ok(vec![Value::closure(closure)]),
+        Err(error) => {
+            let message = vm.heap.intern_string(error.to_string().into_bytes())?;
+            Ok(vec![Value::nil(), Value::string(message)])
+        }
+    }
 }
 
 pub fn native_loadfile(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
@@ -3881,6 +3889,25 @@ impl Vm {
     }
 
     fn numeric_mod(&self, left: Value, right: Value) -> KResult<Value> {
+        if let (Value::Integer(left), Value::Integer(right)) = (left, right) {
+            if right == 0 {
+                return Err(KError::new(
+                    KErrorKind::Runtime("divide by zero".to_owned()),
+                    None,
+                ));
+            }
+            if right == -1 {
+                return Ok(Value::integer(0));
+            }
+            let remainder = left % right;
+            return Ok(Value::integer(
+                if remainder != 0 && (left < 0) != (right < 0) {
+                    remainder.wrapping_add(right)
+                } else {
+                    remainder
+                },
+            ));
+        }
         let (left, right) = self.coerce_numbers(left, right)?;
         if right == 0.0 {
             return Err(KError::new(
@@ -3888,7 +3915,7 @@ impl Vm {
                 None,
             ));
         }
-        Ok(Value::number(left % right))
+        Ok(Value::number(left - (left / right).floor() * right))
     }
 
     fn numeric_pow(&self, left: Value, right: Value) -> KResult<Value> {
@@ -3946,6 +3973,19 @@ impl Vm {
                         None,
                     )
                 })?;
+                let text = text.trim();
+                let (negative, digits) = match text.strip_prefix('-') {
+                    Some(value) => (true, value),
+                    None => (false, text.strip_prefix('+').unwrap_or(text)),
+                };
+                if let Some(number) = digits
+                    .strip_prefix("0x")
+                    .or_else(|| digits.strip_prefix("0X"))
+                    .filter(|hex| hex.contains(['.', 'p', 'P']))
+                    .and_then(Self::parse_hex_number_text)
+                {
+                    return Ok(if negative { -number } else { number });
+                }
                 if let Ok(integer) = Self::parse_integer_text(text) {
                     return Ok(integer as f64);
                 }
@@ -4281,11 +4321,10 @@ impl Vm {
     }
 
     fn parse_hex_number_text(text: &str) -> Option<f64> {
-        let (mantissa, mut exponent) = text
-            .split_once(['p', 'P'])
-            .map_or((text, 0), |(mantissa, exponent)| {
-                (mantissa, exponent.parse::<i32>().unwrap_or(0))
-            });
+        let (mantissa, mut exponent) = match text.split_once(['p', 'P']) {
+            Some((mantissa, exponent)) => (mantissa, exponent.parse::<i32>().ok()?),
+            None => (text, 0),
+        };
         let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
         let normalized_whole = if fraction.is_empty() {
             let trimmed = whole.trim_end_matches('0');

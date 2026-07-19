@@ -205,3 +205,9 @@ fn parent_functions_propagate_child_upvalues_to_grandchildren() -> Result<(), St
     );
     Ok(())
 }
+
+#[test]
+fn forward_goto_to_terminal_label_may_skip_local() -> Result<(), String> {
+    resolve("do goto done; local value = 23; ::done::; end")?;
+    Ok(())
+}

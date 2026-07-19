@@ -336,6 +336,93 @@ fn tonumber_scales_long_hex_fraction_before_positive_exponent()
 }
 
 #[test]
+fn tonumber_rejects_infinity_and_nan_text() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "print(tonumber('inf') == nil, tonumber('Nan') == nil)".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"true\ttrue\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
+fn tonumber_rejects_hex_float_without_exponent_digits() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "print(tonumber('-0xaaP ') == nil)".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"true\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
+fn arithmetic_coerces_hex_float_strings() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "print(1 - '0x.00000001' == 0x.FfffFFFF)".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"true\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
+fn integer_modulo_uses_lua_floor_semantics() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "print(-4 % 3, 4 % -3, math.type(-4 % 3))".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"2\t-2\tinteger\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
+fn floating_modulo_uses_lua_floor_semantics() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec!["-e".to_owned(), "print(-4.0 % 3, 4 % -3.0)".to_owned()],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"2\t-2\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn prints_the_hello_fixture() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary(&fixture_path("hello.lua"))?;
     let expected = ExpectedRun {

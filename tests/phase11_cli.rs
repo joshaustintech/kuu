@@ -54,6 +54,24 @@ fn load_uses_global_environment_when_env_is_nil() -> Result<(), Box<dyn std::err
 }
 
 #[test]
+fn load_returns_nil_and_error_for_invalid_source() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local f, err = load('goto l1; do ::l1:: end'); print(f == nil, err ~= nil)".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"true\ttrue\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    assert!(compare_run(&actual, &expected).is_ok());
+    Ok(())
+}
+
+#[test]
 fn integer_overflow_wraps() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
         args: vec![

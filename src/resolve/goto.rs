@@ -71,6 +71,7 @@ impl Resolver {
                     &local_labels,
                     &frame.inherited_labels,
                     &declaration_indices,
+                    frame.block,
                 )?;
             }
 
@@ -97,10 +98,22 @@ impl Resolver {
         local_labels: &BTreeMap<String, LocalLabel>,
         inherited_labels: &BTreeMap<String, KSpan>,
         declaration_indices: &[usize],
+        block: &Block,
     ) -> KResult<()> {
         if let Some(local_label) = local_labels.get(name) {
+            let ends_block = block
+                .statements
+                .iter()
+                .skip(local_label.stmt_index.saturating_add(1))
+                .all(|stmt| matches!(stmt, Stmt::Empty { .. } | Stmt::Label { .. }));
             if local_label.stmt_index > goto_index
                 && Self::crosses_scope(goto_index, local_label.stmt_index, declaration_indices)
+                && !(ends_block
+                    && Self::only_skips_terminal_plain_locals(
+                        goto_index,
+                        local_label.stmt_index,
+                        block,
+                    ))
             {
                 return Err(Self::scope_crossing_error(goto_span, name));
             }
@@ -118,6 +131,29 @@ impl Resolver {
         declaration_indices
             .iter()
             .any(|index| *index > goto_index && *index < label_index)
+    }
+
+    fn only_skips_terminal_plain_locals(
+        goto_index: usize,
+        label_index: usize,
+        block: &Block,
+    ) -> bool {
+        block
+            .statements
+            .iter()
+            .enumerate()
+            .filter(|(index, _)| *index > goto_index && *index < label_index)
+            .filter(|(_, statement)| Self::stmt_declares_scope(statement))
+            .all(|(_, statement)| match statement {
+                Stmt::LocalDecl {
+                    prefix_attribute,
+                    names,
+                    ..
+                } => {
+                    prefix_attribute.is_none() && names.iter().all(|name| name.attribute.is_none())
+                }
+                _ => false,
+            })
     }
 
     fn stmt_declares_scope(stmt: &Stmt) -> bool {
