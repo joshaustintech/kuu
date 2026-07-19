@@ -807,6 +807,24 @@ fn table_remove_shifts_array_values() -> Result<(), Box<dyn std::error::Error>> 
 }
 
 #[test]
+fn debug_upvalue_access_and_mutation_work() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local x = 1; local function f() return x end; print(debug.getupvalue(f, 1) ~= nil, debug.setupvalue(f, 1, 2), f())".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"true\t(*temporary)\t2\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn collectgarbage_terminates_on_unreachable_closure_cycles()
 -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {

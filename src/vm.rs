@@ -2790,6 +2790,67 @@ pub fn native_debug_getinfo(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> 
     Ok(vec![Value::table(table)])
 }
 
+pub fn native_debug_getupvalue(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let closure = match vm.arg_or_nil(args, 0) {
+        Value::Closure(handle) => handle,
+        value => return Err(vm.type_error("function expected", value)),
+    };
+    let index = vm.integer_arg(args, 1, "upvalue index expected")?;
+    if index < 1 {
+        return Ok(vec![Value::nil()]);
+    }
+    let handle = match vm
+        .heap
+        .resolve_closure(closure)?
+        .upvalues
+        .get(
+            usize::try_from(index - 1)
+                .map_err(|_| Vm::runtime_error("upvalue index out of range"))?,
+        )
+        .copied()
+    {
+        Some(handle) => handle,
+        None => return Ok(vec![Value::nil()]),
+    };
+    let name: &[u8] = if index == 2 { b"_ENV" } else { b"(*temporary)" };
+    let name = Value::string(vm.heap.intern_string(name.to_vec())?);
+    let value = vm.heap.upvalue_value(handle, &vm.stack)?;
+    Ok(vec![name, value])
+}
+
+pub fn native_debug_setupvalue(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let closure = match vm.arg_or_nil(args, 0) {
+        Value::Closure(handle) => handle,
+        value => return Err(vm.type_error("function expected", value)),
+    };
+    let index = vm.integer_arg(args, 1, "upvalue index expected")?;
+    let value = vm.arg_or_nil(args, 2);
+    if index < 1 {
+        return Ok(vec![Value::nil()]);
+    }
+    let handle = match vm
+        .heap
+        .resolve_closure(closure)?
+        .upvalues
+        .get(
+            usize::try_from(index - 1)
+                .map_err(|_| Vm::runtime_error("upvalue index out of range"))?,
+        )
+        .copied()
+    {
+        Some(handle) => handle,
+        None => return Ok(vec![Value::nil()]),
+    };
+    vm.heap.set_upvalue_value(handle, &mut vm.stack, value)?;
+    if index == 2
+        && let Some(first) = vm.heap.resolve_closure(closure)?.upvalues.first().copied()
+    {
+        vm.heap.set_upvalue_value(first, &mut vm.stack, value)?;
+    }
+    let name: &[u8] = if index == 2 { b"_ENV" } else { b"(*temporary)" };
+    Ok(vec![Value::string(vm.heap.intern_string(name.to_vec())?)])
+}
+
 stub_native!(
     native_string_gmatch,
     native_utf8_char,
@@ -2801,8 +2862,6 @@ stub_native!(
     native_io_lines,
     native_package_loadlib,
     native_debug_traceback,
-    native_debug_getupvalue,
-    native_debug_setupvalue,
     native_debug_upvaluejoin,
     native_debug_getlocal,
     native_debug_setlocal,
