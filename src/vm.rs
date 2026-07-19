@@ -685,7 +685,7 @@ pub fn native_type(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
 
 pub fn native_tostring(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     let value = vm.arg_or_nil(args, 0);
-    let text = vm.format_value(value)?;
+    let text = vm.format_tostring(value)?;
     let handle = vm.heap.intern_string(text.into_bytes())?;
     Ok(vec![Value::string(handle)])
 }
@@ -4993,6 +4993,16 @@ impl Vm {
             }
             other => Ok(other.to_string()),
         }
+    }
+
+    fn format_tostring(&self, value: Value) -> KResult<String> {
+        let mut text = self.format_value(value)?;
+        if matches!(value, Value::Number(value) if value.is_finite())
+            && !text.contains(['.', 'e', 'E'])
+        {
+            text.push_str(".0");
+        }
+        Ok(text)
     }
 
     fn is_truthy(&self, value: Value) -> bool {

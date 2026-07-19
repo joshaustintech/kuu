@@ -280,6 +280,24 @@ fn goto_uses_nearest_same_named_label() -> Result<(), Box<dyn std::error::Error>
 }
 
 #[test]
+fn tostring_keeps_large_integral_float_a_float() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local x = 2.0^56 + 8.0; print(tonumber(tostring(x)) == x)".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"true\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn literal_integer_floor_division_by_zero_errors_when_called()
 -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
