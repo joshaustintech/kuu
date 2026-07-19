@@ -76,6 +76,42 @@ fn goto_uses_the_label_in_its_lexical_block() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
+fn goto_does_not_enter_a_sibling_if_branch() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local function f() if true then goto done elseif false then ::done:: return 2 end; ::done:: return 1 end; print(f())".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"1\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
+fn goto_closes_captured_locals_before_reentry() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local closures = {}; do ::again:: local x = #closures + 1; closures[#closures + 1] = function() return x end; if #closures < 2 then goto again end end; print(debug.upvalueid(closures[1], 1) ~= debug.upvalueid(closures[2], 1))".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"true\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn floating_division_by_zero_returns_ieee_values() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
         args: vec![

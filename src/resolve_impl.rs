@@ -59,6 +59,7 @@ pub struct ResolvedFunction {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DeclarationRecord {
+    pub id: usize,
     pub name: String,
     pub kind: DeclarationKind,
     pub slot: usize,
@@ -83,6 +84,7 @@ pub struct LabelRecord {
     pub span: KSpan,
     pub active_decls: BTreeSet<usize>,
     pub block_depth: usize,
+    pub scope_path: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -91,6 +93,7 @@ pub struct GotoRecord {
     pub span: KSpan,
     pub active_decls: BTreeSet<usize>,
     pub block_depth: usize,
+    pub scope_path: Vec<usize>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -205,6 +208,7 @@ pub(crate) struct BlockFrame {
     pub(crate) global_undos: Vec<(String, Option<GlobalBinding>)>,
     pub(crate) label_undos: Vec<(String, Option<LabelRecord>)>,
     pub(crate) decl_ids: Vec<usize>,
+    pub(crate) scope_id: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -231,6 +235,7 @@ pub(crate) struct FunctionState {
     pub(crate) next_global_slot: usize,
     pub(crate) next_upvalue_slot: usize,
     pub(crate) next_decl_id: usize,
+    pub(crate) next_scope_id: usize,
     pub(crate) block_frames: Vec<BlockFrame>,
 }
 
@@ -289,6 +294,7 @@ impl FunctionState {
             next_global_slot: 0,
             next_upvalue_slot: 0,
             next_decl_id: 0,
+            next_scope_id: 0,
             block_frames: Vec::new(),
         }
     }
@@ -308,6 +314,8 @@ impl FunctionState {
     }
 
     pub(crate) fn push_block(&mut self) {
+        let scope_id = self.next_scope_id;
+        self.next_scope_id = self.next_scope_id.saturating_add(1);
         self.block_frames.push(BlockFrame {
             previous_policy: self.global_policy,
             previous_global_default: self.has_global_default,
@@ -315,8 +323,13 @@ impl FunctionState {
             global_undos: Vec::new(),
             label_undos: Vec::new(),
             decl_ids: Vec::new(),
+            scope_id,
         });
         self.block_depth += 1;
+    }
+
+    fn scope_path(&self) -> Vec<usize> {
+        self.block_frames.iter().map(|frame| frame.scope_id).collect()
     }
 
     pub(crate) fn pop_block(&mut self) {
@@ -399,6 +412,7 @@ impl FunctionState {
         let previous = self.visible_bindings.insert(name.clone(), binding.clone());
         self.active_decls.insert(decl_id);
         self.declarations.push(DeclarationRecord {
+            id: decl_id,
             name: name.clone(),
             kind,
             slot,
@@ -436,6 +450,7 @@ impl FunctionState {
         let previous = self.globals.insert(name.clone(), binding.clone());
         self.active_decls.insert(decl_id);
         self.declarations.push(DeclarationRecord {
+            id: decl_id,
             name: name.clone(),
             kind,
             slot,
@@ -462,6 +477,7 @@ impl FunctionState {
         let decl_id = self.next_decl_id();
         self.active_decls.insert(decl_id);
         let record = DeclarationRecord {
+            id: decl_id,
             name: "*".to_owned(),
             kind: DeclarationKind::GlobalDefault,
             slot,
@@ -484,6 +500,7 @@ impl FunctionState {
             span,
             active_decls: self.active_decls.clone(),
             block_depth: self.block_depth,
+            scope_path: self.scope_path(),
         };
         let previous = self.visible_labels.insert(name.clone(), record.clone());
         self.labels.push(record.clone());
@@ -499,6 +516,7 @@ impl FunctionState {
             span,
             active_decls: self.active_decls.clone(),
             block_depth: self.block_depth,
+            scope_path: self.scope_path(),
         };
         self.gotos.push(record.clone());
         record

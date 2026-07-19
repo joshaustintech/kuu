@@ -398,10 +398,71 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     fn compile_goto(&mut self, name: &str, span: KSpan) -> KResult<()> {
-        self.emit_close_for_active_scopes()?;
+        if let Some(slot) = self.goto_close_slot(name, span) {
+            self.instructions.push(Instruction::Close {
+                from: Register::new(slot),
+            });
+        }
         let jump = self.emit_jump_placeholder();
         self.goto_patches.push((jump, name.to_owned(), span));
         Ok(())
+    }
+
+    fn goto_close_slot(&self, name: &str, span: KSpan) -> Option<u16> {
+        let source = self
+            .resolved
+            .gotos
+            .iter()
+            .find(|record| record.name == name && record.span == span)?;
+        let target = self
+            .resolved
+            .labels
+            .iter()
+            .filter(|label| label.name == name)
+            .filter(|label| source.scope_path.starts_with(&label.scope_path))
+            .filter(|label| label.active_decls == source.active_decls)
+            .min_by_key(|label| {
+                let future = label.span.start_line > span.start_line
+                    || (label.span.start_line == span.start_line
+                        && label.span.start_column > span.start_column);
+                (!future, label.span.start_line, label.span.start_column)
+            })
+            .or_else(|| {
+                self.resolved
+                    .labels
+                    .iter()
+                    .filter(|label| {
+                        label.name == name
+                            && source.scope_path.starts_with(&label.scope_path)
+                            && (label.span.start_line > span.start_line
+                                || (label.span.start_line == span.start_line
+                                    && label.span.start_column > span.start_column))
+                    })
+                    .min_by_key(|label| (label.span.start_line, label.span.start_column))
+            })
+            .or_else(|| {
+                self.resolved
+                    .labels
+                    .iter()
+                    .filter(|label| {
+                        label.name == name
+                            && source.scope_path.starts_with(&label.scope_path)
+                            && (label.span.start_line < span.start_line
+                                || (label.span.start_line == span.start_line
+                                    && label.span.start_column <= span.start_column))
+                    })
+                    .max_by_key(|label| (label.span.start_line, label.span.start_column))
+            })?;
+        self.resolved
+            .declarations
+            .iter()
+            .filter(|declaration| matches!(declaration.kind, DeclarationKind::Local))
+            .filter(|declaration| {
+                source.active_decls.contains(&declaration.id)
+                    && !target.active_decls.contains(&declaration.id)
+            })
+            .filter_map(|declaration| u16::try_from(declaration.slot).ok())
+            .min()
     }
 
     fn compile_if(
@@ -1665,12 +1726,13 @@ impl<'a> FunctionCompiler<'a> {
     fn patch_gotos(&mut self) -> KResult<()> {
         let patches = self.goto_patches.clone();
         for (index, name, goto_span) in patches {
-            let goto_active_decls = self
+            let goto_record = self
                 .resolved
                 .gotos
                 .iter()
-                .find(|record| record.name == name && record.span == goto_span)
-                .map(|record| &record.active_decls);
+                .find(|record| record.name == name && record.span == goto_span);
+            let goto_active_decls = goto_record.map(|record| &record.active_decls);
+            let goto_scope_path = goto_record.map(|record| &record.scope_path);
             let labels = self
                 .labels
                 .get(&name)
@@ -1680,6 +1742,9 @@ impl<'a> FunctionCompiler<'a> {
                 .labels
                 .iter()
                 .filter(|label| label.name == name)
+                .filter(|label| {
+                    goto_scope_path.is_some_and(|path| path.starts_with(&label.scope_path))
+                })
                 .filter(|label| {
                     goto_active_decls.is_some_and(|active| label.active_decls == *active)
                 })
@@ -1697,26 +1762,44 @@ impl<'a> FunctionCompiler<'a> {
                 })
                 .map(|(_, target)| target)
                 .or_else(|| {
-                    labels
+                    self.resolved
+                        .labels
                         .iter()
-                        .filter(|(span, _)| {
-                            span.start_line > goto_span.start_line
-                                || (span.start_line == goto_span.start_line
-                                    && span.start_column > goto_span.start_column)
+                        .filter(|label| {
+                            label.name == name
+                                && goto_scope_path
+                                    .is_some_and(|path| path.starts_with(&label.scope_path))
+                                && (label.span.start_line > goto_span.start_line
+                                    || (label.span.start_line == goto_span.start_line
+                                        && label.span.start_column > goto_span.start_column))
                         })
-                        .min_by_key(|(span, _)| (span.start_line, span.start_column))
-                        .map(|(_, target)| *target)
+                        .min_by_key(|label| (label.span.start_line, label.span.start_column))
+                        .and_then(|label| {
+                            labels
+                                .iter()
+                                .find(|(span, _)| *span == label.span)
+                                .map(|(_, target)| *target)
+                        })
                 })
                 .or_else(|| {
-                    labels
+                    self.resolved
+                        .labels
                         .iter()
-                        .filter(|(span, _)| {
-                            span.start_line < goto_span.start_line
-                                || (span.start_line == goto_span.start_line
-                                    && span.start_column <= goto_span.start_column)
+                        .filter(|label| {
+                            label.name == name
+                                && goto_scope_path
+                                    .is_some_and(|path| path.starts_with(&label.scope_path))
+                                && (label.span.start_line < goto_span.start_line
+                                    || (label.span.start_line == goto_span.start_line
+                                        && label.span.start_column <= goto_span.start_column))
                         })
-                        .max_by_key(|(span, _)| (span.start_line, span.start_column))
-                        .map(|(_, target)| *target)
+                        .max_by_key(|label| (label.span.start_line, label.span.start_column))
+                        .and_then(|label| {
+                            labels
+                                .iter()
+                                .find(|(span, _)| *span == label.span)
+                                .map(|(_, target)| *target)
+                        })
                 })
                 .ok_or_else(|| KError::bytecode(format!("unresolved label '{name}'")))?;
             self.patch_jump(index, target)?;
