@@ -565,6 +565,21 @@ impl Heap {
             )
         })
     }
+
+    fn resolve_closure_mut(&mut self, handle: ClosureHandle) -> KResult<&mut ClosureObject> {
+        let index = usize::try_from(handle.raw()).map_err(|_| {
+            KError::new(
+                KErrorKind::Runtime("invalid closure handle".to_owned()),
+                None,
+            )
+        })?;
+        self.closures.get_mut(index).ok_or_else(|| {
+            KError::new(
+                KErrorKind::Runtime("invalid closure handle".to_owned()),
+                None,
+            )
+        })
+    }
 }
 
 pub fn native_print(_vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
@@ -886,7 +901,13 @@ pub fn native_load(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
         reader @ (Value::Closure(_) | Value::NativeFunction(_)) => {
             let mut bytes = Vec::new();
             loop {
-                let chunk = vm.call_value_sync(reader, Vec::new(), 0)?;
+                let chunk = match vm.call_value_sync(reader, Vec::new(), 0) {
+                    Ok(chunk) => chunk,
+                    Err(error) => {
+                        let message = vm.heap.intern_string(error.to_string().into_bytes())?;
+                        return Ok(vec![Value::nil(), Value::string(message)]);
+                    }
+                };
                 match chunk {
                     Value::Nil => break,
                     Value::String(handle) => {
@@ -897,7 +918,9 @@ pub fn native_load(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
                         bytes.extend(chunk);
                     }
                     other => {
-                        return Err(vm.type_error("reader function must return a string", other));
+                        let error = vm.type_error("reader function must return a string", other);
+                        let message = vm.heap.intern_string(error.to_string().into_bytes())?;
+                        return Ok(vec![Value::nil(), Value::string(message)]);
                     }
                 }
             }
@@ -910,12 +933,22 @@ pub fn native_load(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
         }
     };
     let mode = vm.optional_string_text_arg(args, 2)?;
+    let chunk_name = match vm.arg_or_nil(args, 1) {
+        Value::Nil => None,
+        Value::String(handle) => Some(vm.string_bytes_from_handle(handle)?),
+        value => return Err(vm.type_error("string expected", value)),
+    };
     let env = match vm.arg_or_nil(args, 3) {
         Value::Nil => None,
         value => Some(value),
     };
     match vm.load_chunk_bytes(&source, mode.as_deref(), env) {
-        Ok(closure) => Ok(vec![Value::closure(closure)]),
+        Ok(closure) => {
+            if let Some(name) = chunk_name {
+                vm.heap.resolve_closure_mut(closure)?.proto.name = Some(name);
+            }
+            Ok(vec![Value::closure(closure)])
+        }
         Err(error) => {
             let rendered = if let Some(span) = error.span() {
                 format!(":{}: {error}", span.start_line)
@@ -1083,6 +1116,43 @@ pub fn native_table_unpack(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
         );
     }
     Ok(values)
+}
+
+pub fn native_table_remove(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let table = vm.table_arg(args, 0, "table expected")?;
+    let length = vm.heap.resolve_table(table)?.array.len();
+    if length == 0 {
+        return Ok(vec![Value::nil()]);
+    }
+    let position = match vm.arg_or_nil(args, 1) {
+        Value::Nil => length,
+        _ => usize::try_from(vm.integer_arg(args, 1, "integer expected")?)
+            .map_err(|_| Vm::runtime_error("position out of bounds"))?,
+    };
+    if position == 0 || position > length {
+        return Ok(vec![Value::nil()]);
+    }
+    let removed = vm.heap.resolve_table(table)?.raw_get(Value::integer(
+        i64::try_from(position).map_err(|_| Vm::runtime_error("table index overflow"))?,
+    ))?;
+    for index in position..length {
+        let next = vm.heap.resolve_table(table)?.raw_get(Value::integer(
+            i64::try_from(index + 1).map_err(|_| Vm::runtime_error("table index overflow"))?,
+        ))?;
+        vm.heap.resolve_table_mut(table)?.raw_set(
+            Value::integer(
+                i64::try_from(index).map_err(|_| Vm::runtime_error("table index overflow"))?,
+            ),
+            next,
+        )?;
+    }
+    vm.heap.resolve_table_mut(table)?.raw_set(
+        Value::integer(
+            i64::try_from(length).map_err(|_| Vm::runtime_error("table index overflow"))?,
+        ),
+        Value::nil(),
+    )?;
+    Ok(vec![removed])
 }
 
 pub fn native_table_pack(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
@@ -2658,13 +2728,41 @@ pub fn native_debug_upvalueid(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>
 }
 
 pub fn native_debug_getinfo(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
-    let level = vm.integer_arg(args, 0, "debug.getinfo expects a stack level")?;
-    if level < 1 {
-        return Ok(vec![Value::nil()]);
-    }
-    let level = usize::try_from(level)
-        .map_err(|_| Vm::runtime_error("debug.getinfo stack level overflow"))?;
-    let Some(frame_index) = vm.frames.len().checked_sub(level) else {
+    let target = vm.arg_or_nil(args, 0);
+    let frame_index = match target {
+        Value::Integer(level) => {
+            if level < 1 {
+                return Ok(vec![Value::nil()]);
+            }
+            let level = usize::try_from(level)
+                .map_err(|_| Vm::runtime_error("debug.getinfo stack level overflow"))?;
+            let Some(frame_index) = vm.frames.len().checked_sub(level) else {
+                return Ok(vec![Value::nil()]);
+            };
+            Some(frame_index)
+        }
+        Value::Closure(handle) => {
+            let options = match vm.arg_or_nil(args, 1) {
+                Value::Nil => b"flnSrut".to_vec(),
+                Value::String(options) => vm.string_bytes_from_handle(options)?,
+                value => return Err(vm.type_error("string expected", value)),
+            };
+            let table = vm.new_table_handle()?;
+            if options.contains(&b'S') {
+                let source = vm.heap.resolve_closure(handle)?.proto.name.clone();
+                let key = vm.heap.intern_string(b"source".to_vec())?;
+                let value = source
+                    .map(|bytes| vm.heap.intern_string(bytes).map(Value::string))
+                    .transpose()?
+                    .unwrap_or(Value::nil());
+                vm.table_set(Value::table(table), Value::string(key), value)?;
+            }
+            return Ok(vec![Value::table(table)]);
+        }
+        Value::NativeFunction(_) => return Ok(vec![Value::table(vm.new_table_handle()?)]),
+        _ => return Err(vm.type_error("function or stack level expected", target)),
+    };
+    let Some(frame_index) = frame_index else {
         return Ok(vec![Value::nil()]);
     };
     let options = match vm.arg_or_nil(args, 1) {
@@ -2699,7 +2797,6 @@ stub_native!(
     native_utf8_codepoint,
     native_utf8_len,
     native_table_insert,
-    native_table_remove,
     native_table_move,
     native_io_lines,
     native_package_loadlib,
