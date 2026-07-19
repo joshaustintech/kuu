@@ -1,6 +1,31 @@
 mod support;
 
-use support::{ExpectedRun, RunOptions, compare_run, fixture_path, run_binary, run_binary_with};
+use std::fs;
+
+use support::{
+    ExpectedRun, RunOptions, TempDir, compare_run, fixture_path, run_binary, run_binary_with,
+};
+
+#[test]
+fn calls_prefix_keeps_nested_table_alive_across_gc_steps() -> Result<(), Box<dyn std::error::Error>>
+{
+    let upstream = fixture_path("../upstream/lua-5.5.0-tests/calls.lua");
+    let source = fs::read_to_string(upstream)?;
+    let end = source
+        .find("\nprint('+')")
+        .ok_or("calls.lua prefix marker missing")?;
+    let dir = TempDir::new("calls-gc")?;
+    let script = dir.write("calls-prefix.lua", &source[..end])?;
+    let actual = run_binary(&script)?;
+    let expected = ExpectedRun {
+        stdout: b"testing functions and calls\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
 
 #[test]
 fn global_declaration_without_assignment_preserves_existing_global()

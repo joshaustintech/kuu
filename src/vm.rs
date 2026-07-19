@@ -3708,7 +3708,7 @@ impl Vm {
 
     fn new_table_handle(&mut self) -> KResult<TableHandle> {
         let handle = self.heap.new_table()?;
-        if matches!(self.gc_phase, GcPhase::Mark) {
+        if !matches!(self.gc_phase, GcPhase::Pause) {
             self.gc_mark_table(handle);
         }
         Ok(handle)
