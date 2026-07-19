@@ -673,6 +673,45 @@ fn fixed_point_closure_can_call_a_returned_closure() -> Result<(), Box<dyn std::
 }
 
 #[test]
+fn local_binding_shadows_a_prior_global_declaration() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "global <const> *; global function value() return 1 end; value = nil; local value = function() return 2 end; print(value())"
+                .to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"2\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
+fn recursive_multi_return_does_not_leak_register_values() -> Result<(), Box<dyn std::error::Error>>
+{
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local function unpack(t, i) i = i or 1; if i <= #t then return t[i], unpack(t, i + 1) end end; local a, b, c, d = unpack({1, 2, 3}); print(a, b, c, d == nil)"
+                .to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"1\t2\t3\ttrue\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn table_concat_joins_range_with_separator() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
         args: vec![

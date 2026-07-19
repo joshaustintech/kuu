@@ -55,6 +55,7 @@ struct Frame {
     return_target: Option<ReturnTarget>,
     varargs: Vec<Value>,
     last_call_results: usize,
+    last_call_end: usize,
 }
 
 #[allow(dead_code)]
@@ -3411,6 +3412,8 @@ impl Vm {
                         } else {
                             site.results
                         };
+                        frame.last_call_end =
+                            site.call_slot.saturating_add(frame.last_call_results);
                     }
                 }
                 Ok(())
@@ -3489,7 +3492,8 @@ impl Vm {
             pc: 0,
             return_target: Some(ReturnTarget { base, results }),
             varargs,
-            last_call_results: 0,
+            last_call_results: usize::MAX,
+            last_call_end: 0,
         };
         let _ = caller_index;
         self.frames.push(frame);
@@ -3550,7 +3554,8 @@ impl Vm {
             .ok_or_else(|| KError::new(KErrorKind::Runtime("stack overflow".to_owned()), None))?;
         frame.pc = 0;
         frame.varargs = varargs;
-        frame.last_call_results = 0;
+        frame.last_call_results = usize::MAX;
+        frame.last_call_end = 0;
         Ok(())
     }
 
@@ -3621,6 +3626,7 @@ impl Vm {
                 } else {
                     target.results
                 };
+                frame.last_call_end = target.base.saturating_add(frame.last_call_results);
             }
         } else {
             *finished = values;
@@ -3714,6 +3720,7 @@ impl Vm {
         }
         if let Some(frame) = self.frames.get_mut(frame_index) {
             frame.last_call_results = written;
+            frame.last_call_end = start.saturating_add(written);
             frame.top = start.saturating_add(written);
         }
         Ok(())
@@ -3774,7 +3781,11 @@ impl Vm {
                 KError::new(KErrorKind::Runtime("missing frame".to_owned()), None)
             })?;
             let start = self.absolute_register(frame_index, first)?;
-            let count = frame.top.saturating_sub(start);
+            let count = if frame.last_call_results != usize::MAX {
+                frame.last_call_end.saturating_sub(start)
+            } else {
+                frame.top.saturating_sub(start)
+            };
             let mut values = Vec::with_capacity(count);
             for offset in 0..count {
                 let index = start.checked_add(offset).ok_or_else(|| {
@@ -4977,6 +4988,10 @@ impl Vm {
                 let saved_last_results = saved_frames
                     .last()
                     .map(|frame| frame.last_call_results)
+                    .unwrap_or(usize::MAX);
+                let saved_last_end = saved_frames
+                    .last()
+                    .map(|frame| frame.last_call_end)
                     .unwrap_or(0);
                 let result = self.run_closure_with_args(handle, args);
                 self.stack = saved_stack;
@@ -4984,6 +4999,7 @@ impl Vm {
                 self.open_upvalues = saved_open_upvalues;
                 if let Some(frame) = self.frames.last_mut() {
                     frame.last_call_results = saved_last_results;
+                    frame.last_call_end = saved_last_end;
                 }
                 result
             }
@@ -5037,7 +5053,8 @@ impl Vm {
             pc: 0,
             return_target: None,
             varargs,
-            last_call_results: 0,
+            last_call_results: usize::MAX,
+            last_call_end: 0,
         });
         let mut finished = Vec::new();
         let result = (|| {
@@ -5193,7 +5210,8 @@ impl Vm {
             pc: 0,
             return_target: None,
             varargs: Vec::new(),
-            last_call_results: 0,
+            last_call_results: usize::MAX,
+            last_call_end: 0,
         });
 
         self.push_arguments_into_root_frame(args)?;
