@@ -1497,6 +1497,9 @@ pub fn native_math_abs(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
 }
 
 pub fn native_math_ceil(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    if let Value::Integer(value) = vm.arg_or_nil(args, 0) {
+        return Ok(vec![Value::integer(value)]);
+    }
     let value = vm.number_arg(args, 0, "number expected")?;
     if !value.is_finite() {
         return Ok(vec![Value::number(value)]);
@@ -1506,6 +1509,9 @@ pub fn native_math_ceil(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
 }
 
 pub fn native_math_floor(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    if let Value::Integer(value) = vm.arg_or_nil(args, 0) {
+        return Ok(vec![Value::integer(value)]);
+    }
     let value = vm.number_arg(args, 0, "number expected")?;
     if !value.is_finite() {
         return Ok(vec![Value::number(value)]);

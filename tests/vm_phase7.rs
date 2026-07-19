@@ -76,6 +76,25 @@ fn integer_floor_division_keeps_integer_precision() -> Result<(), Box<dyn std::e
 }
 
 #[test]
+fn math_rounding_preserves_integer_inputs() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "print(math.type(math.floor(math.maxinteger)), math.type(math.ceil(math.mininteger)))"
+                .to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"integer\tinteger\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn unary_minus_preserves_integer_type_and_wraps_minimum() -> Result<(), Box<dyn std::error::Error>>
 {
     let actual = run_binary_with(RunOptions {
