@@ -236,6 +236,7 @@ pub enum Instruction {
         table: Register,
         key: Register,
     },
+    GcStep,
     GetTable {
         dst: Register,
         table: Register,
@@ -363,6 +364,7 @@ enum Opcode {
     Unary = 27,
     SetTableRange = 28,
     CheckGlobal = 29,
+    GcStep = 30,
 }
 
 impl Opcode {
@@ -398,6 +400,7 @@ impl Opcode {
             27 => Ok(Self::Unary),
             28 => Ok(Self::SetTableRange),
             29 => Ok(Self::CheckGlobal),
+            30 => Ok(Self::GcStep),
             _ => Err(KError::bytecode(format!("unknown opcode {value}"))),
         }
     }
@@ -465,6 +468,7 @@ impl Instruction {
                 write_register(writer, *table);
                 write_register(writer, *key);
             }
+            Self::GcStep => writer.write_u8(Opcode::GcStep as u8),
             Self::GetTable { dst, table, key } => {
                 writer.write_u8(Opcode::GetTable as u8);
                 write_register(writer, *dst);
@@ -650,6 +654,7 @@ impl Instruction {
                 table: read_register(reader)?,
                 key: read_register(reader)?,
             }),
+            Opcode::GcStep => Ok(Self::GcStep),
             Opcode::GetTable => Ok(Self::GetTable {
                 dst: read_register(reader)?,
                 table: read_register(reader)?,

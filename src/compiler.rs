@@ -243,7 +243,8 @@ impl<'a> FunctionCompiler<'a> {
     }
 
     fn compile_stmt(&mut self, stmt: &Stmt) -> KResult<()> {
-        match stmt {
+        let temp_floor = self.next_temp;
+        let result = match stmt {
             Stmt::Empty { .. } => Ok(()),
             Stmt::Break { .. } => self.compile_break(),
             Stmt::Goto { span, name } => self.compile_goto(name, *span),
@@ -317,7 +318,16 @@ impl<'a> FunctionCompiler<'a> {
                 let _ = self.compile_call_into(scratch, call, 0, false)?;
                 Ok(())
             }
+        };
+        if result.is_ok() {
+            for slot in temp_floor..self.next_temp {
+                self.instructions.push(Instruction::LoadNil {
+                    dst: Register::new(slot),
+                });
+            }
+            self.instructions.push(Instruction::GcStep);
         }
+        result
     }
 
     fn compile_return(&mut self, return_stmt: &crate::ast::ReturnStmt) -> KResult<()> {
@@ -509,8 +519,14 @@ impl<'a> FunctionCompiler<'a> {
 
     fn compile_while(&mut self, condition: &Expr, block: &Block) -> KResult<()> {
         let loop_start = self.instructions.len();
+        let condition_floor = self.next_temp;
         let cond_reg = self.compile_expr_result(condition)?;
         let exit_jump = self.emit_conditional_jump(false, cond_reg);
+        for slot in condition_floor..self.next_temp {
+            self.instructions.push(Instruction::LoadNil {
+                dst: Register::new(slot),
+            });
+        }
         self.loop_stack.push(LoopFrame {
             break_sites: Vec::new(),
             close_from: None,

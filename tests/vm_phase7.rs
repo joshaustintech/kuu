@@ -384,6 +384,24 @@ fn loop_closures_keep_each_iteration_locals() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
+fn weak_values_clear_during_statement_safepoints() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local x = {[1] = {}}; setmetatable(x, {__mode = 'kv'}); local n = 0; while x[1] and n < 100 do local a = n .. n .. n; n = n + 1 end; print(n < 100, x[1] == nil)".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"true\ttrue\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn math_fmod_preserves_float_result_for_float_input() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
         args: vec![

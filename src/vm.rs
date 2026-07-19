@@ -11,7 +11,7 @@ use crate::value::{
     Value,
 };
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::convert::TryFrom;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
@@ -219,11 +219,40 @@ impl TableObject {
         }
     }
 
-    fn iter_values(&self) -> impl Iterator<Item = Value> + '_ {
+    fn entries(&self) -> impl Iterator<Item = (Value, Value)> + '_ {
         self.array
             .iter()
             .copied()
-            .chain(self.hash.values().copied())
+            .enumerate()
+            .map(|(index, value)| {
+                (
+                    Value::integer(i64::try_from(index + 1).unwrap_or(i64::MAX)),
+                    value,
+                )
+            })
+            .chain(
+                self.hash
+                    .iter()
+                    .map(|(key, value)| (key_from_luakey(*key), *value)),
+            )
+    }
+
+    fn clear_weak_entries(&mut self, weak_keys: bool, weak_values: bool, dead: &BTreeSet<u64>) {
+        if weak_values {
+            for value in &mut self.array {
+                if matches!(value, Value::Table(handle) if dead.contains(&handle.raw())) {
+                    *value = Value::nil();
+                }
+            }
+            self.trim_array();
+        }
+        self.hash.retain(|key, value| {
+            let dead_key =
+                weak_keys && matches!(key, LuaKey::Table(handle) if dead.contains(&handle.raw()));
+            let dead_value = weak_values
+                && matches!(value, Value::Table(handle) if dead.contains(&handle.raw()));
+            !dead_key && !dead_value
+        });
     }
 
     fn raw_len(&self) -> usize {
@@ -3103,16 +3132,17 @@ impl Vm {
     }
 
     fn advance_pc(&mut self, frame_index: usize) -> KResult<()> {
-        let frame = self
-            .frames
-            .get_mut(frame_index)
-            .ok_or_else(|| KError::new(KErrorKind::Runtime("missing frame".to_owned()), None))?;
-        frame.pc = frame.pc.checked_add(1).ok_or_else(|| {
-            KError::new(
-                KErrorKind::Runtime("program counter overflow".to_owned()),
-                None,
-            )
-        })?;
+        {
+            let frame = self.frames.get_mut(frame_index).ok_or_else(|| {
+                KError::new(KErrorKind::Runtime("missing frame".to_owned()), None)
+            })?;
+            frame.pc = frame.pc.checked_add(1).ok_or_else(|| {
+                KError::new(
+                    KErrorKind::Runtime("program counter overflow".to_owned()),
+                    None,
+                )
+            })?;
+        }
         Ok(())
     }
 
@@ -3672,6 +3702,14 @@ impl Vm {
 
     fn table_set(&mut self, value: Value, key: Value, next: Value) -> KResult<()> {
         self.newindex_value(value, key, next, 0)
+    }
+
+    fn new_table_handle(&mut self) -> KResult<TableHandle> {
+        let handle = self.heap.new_table()?;
+        if matches!(self.gc_phase, GcPhase::Mark) {
+            self.gc_mark_table(handle);
+        }
+        Ok(handle)
     }
 
     fn check_global_unset(&self, table: Value, key: Value) -> KResult<()> {
@@ -5017,6 +5055,12 @@ impl Vm {
                 self.check_global_unset(table, key)?;
                 self.advance_pc(frame_index)?;
             }
+            Instruction::GcStep => {
+                if self.gc_running {
+                    let _ = self.gc_step(1)?;
+                }
+                self.advance_pc(frame_index)?;
+            }
             Instruction::GetTable { dst, table, key } => {
                 let table_value = self.read_register(frame_index, table)?;
                 let key_value = self.read_register(frame_index, key)?;
@@ -5084,7 +5128,7 @@ impl Vm {
                 }
             }
             Instruction::NewTable { dst } => {
-                let handle = self.heap.new_table()?;
+                let handle = self.new_table_handle()?;
                 self.write_register(frame_index, dst, Value::table(handle))?;
                 self.advance_pc(frame_index)?;
             }
@@ -5399,6 +5443,7 @@ impl Vm {
                         work = work.saturating_add(1);
                         continue;
                     }
+                    self.gc_clear_weak_tables()?;
                     self.gc_phase = GcPhase::Sweep;
                     self.gc_sweep_cursor = 0;
                 }
@@ -5457,6 +5502,8 @@ impl Vm {
             self.frames.iter().map(|frame| frame.closure).collect();
         let open_handles = self.open_upvalues.clone();
         self.gc_mark_value(Value::Table(self.globals));
+        self.gc_mark_table(self.string_metatable);
+        self.gc_mark_table(self.file_metatable);
         for handle in metatables {
             self.gc_mark_table(handle);
         }
@@ -5512,12 +5559,78 @@ impl Vm {
             return Ok(());
         };
         let metatable = table.metatable;
-        let values: Vec<Value> = table.iter_values().collect();
+        let entries: Vec<(Value, Value)> = table.entries().collect();
+        let (weak_keys, weak_values) = self.table_weak_mode(handle)?;
         if let Some(metatable) = metatable {
             self.gc_mark_table(metatable);
         }
-        for value in values {
-            self.gc_mark_value(value);
+        for (key, value) in entries {
+            if !weak_keys {
+                self.gc_mark_value(key);
+            }
+            if !weak_values {
+                self.gc_mark_value(value);
+            }
+        }
+        Ok(())
+    }
+
+    fn table_weak_mode(&mut self, table: TableHandle) -> KResult<(bool, bool)> {
+        let Some(metatable) = self.heap.resolve_table(table)?.metatable else {
+            return Ok((false, false));
+        };
+        let key = self.heap.intern_string(b"__mode".to_vec())?;
+        let mode = self
+            .heap
+            .resolve_table(metatable)?
+            .raw_get(Value::string(key))?;
+        let Value::String(mode) = mode else {
+            return Ok((false, false));
+        };
+        let bytes = self.heap.string_bytes(mode).unwrap_or_default();
+        Ok((bytes.contains(&b'k'), bytes.contains(&b'v')))
+    }
+
+    fn gc_clear_weak_tables(&mut self) -> KResult<()> {
+        let dead: BTreeSet<u64> = self
+            .heap
+            .tables
+            .iter()
+            .enumerate()
+            .filter_map(|(index, table)| {
+                table
+                    .as_ref()
+                    .filter(|table| !table.marked)
+                    .and_then(|_| u64::try_from(index).ok())
+            })
+            .collect();
+        let marked_tables: Vec<TableHandle> = self
+            .heap
+            .tables
+            .iter()
+            .enumerate()
+            .filter_map(|(index, table)| {
+                table
+                    .as_ref()
+                    .filter(|table| table.marked)
+                    .and_then(|_| u64::try_from(index).ok().map(TableHandle::new))
+            })
+            .collect();
+        let weak_tables: Vec<(TableHandle, bool, bool)> = marked_tables
+            .into_iter()
+            .map(|handle| {
+                self.table_weak_mode(handle)
+                    .map(|(keys, values)| (handle, keys, values))
+            })
+            .collect::<KResult<Vec<_>>>()?;
+        for (handle, weak_keys, weak_values) in weak_tables {
+            if weak_keys || weak_values {
+                self.heap.resolve_table_mut(handle)?.clear_weak_entries(
+                    weak_keys,
+                    weak_values,
+                    &dead,
+                );
+            }
         }
         Ok(())
     }

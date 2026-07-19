@@ -34,6 +34,10 @@ fn simple_arithmetic_and_assignment_compile_to_expected_bytecode() -> Result<(),
                 dst: Register::new(0),
                 src: Register::new(1),
             },
+            Instruction::LoadNil {
+                dst: Register::new(1),
+            },
+            Instruction::GcStep,
             Instruction::Move {
                 dst: Register::new(3),
                 src: Register::new(0),
@@ -52,6 +56,16 @@ fn simple_arithmetic_and_assignment_compile_to_expected_bytecode() -> Result<(),
                 dst: Register::new(0),
                 src: Register::new(2),
             },
+            Instruction::LoadNil {
+                dst: Register::new(2),
+            },
+            Instruction::LoadNil {
+                dst: Register::new(3),
+            },
+            Instruction::LoadNil {
+                dst: Register::new(4),
+            },
+            Instruction::GcStep,
             Instruction::Move {
                 dst: Register::new(5),
                 src: Register::new(0),

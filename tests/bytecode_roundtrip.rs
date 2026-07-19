@@ -42,6 +42,7 @@ fn sample_instructions() -> KResult<Vec<Instruction>> {
             table: Register::new(8),
             key: Register::new(9),
         },
+        Instruction::GcStep,
         Instruction::GetTable {
             dst: Register::new(9),
             table: Register::new(10),
