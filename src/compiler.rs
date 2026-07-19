@@ -176,7 +176,9 @@ impl<'a> FunctionCompiler<'a> {
             };
 
             if let Some(decl) = parent.declarations.iter().find(|record| {
-                record.name == binding.name && matches!(record.kind, DeclarationKind::Local)
+                record.name == binding.name
+                    && record.span == binding.declaration_span
+                    && matches!(record.kind, DeclarationKind::Local)
             }) {
                 descriptors.push(UpvalueDescriptor {
                     instack: true,
@@ -314,9 +316,15 @@ impl<'a> FunctionCompiler<'a> {
         if return_stmt.values.len() == 1
             && matches!(return_stmt.values.first(), Some(Expr::Vararg { .. }))
         {
+            let value = return_stmt
+                .values
+                .first()
+                .ok_or_else(|| KError::bytecode("missing return value"))?;
+            let start = Register::new(self.next_temp);
+            self.compile_expr_into(start, value, usize::MAX)?;
             self.emit_close_for_active_scopes()?;
             self.instructions.push(Instruction::Return {
-                first: Register::new(0),
+                first: start,
                 count: u16::MAX,
             });
             return Ok(());
@@ -332,6 +340,27 @@ impl<'a> FunctionCompiler<'a> {
         }
 
         let start = Register::new(self.next_temp);
+        if let Some((last, prefix)) = return_stmt.values.split_last()
+            && matches!(last, Expr::Call { .. } | Expr::Vararg { .. })
+        {
+            let written = self.compile_value_list_into(start, prefix, Some(prefix.len()), false)?;
+            let trailing = Register::new(
+                start
+                    .index()
+                    .checked_add(
+                        u16::try_from(written)
+                            .map_err(|_| KError::bytecode("register overflow"))?,
+                    )
+                    .ok_or_else(|| KError::bytecode("register overflow"))?,
+            );
+            self.compile_expr_into(trailing, last, usize::MAX)?;
+            self.emit_close_for_active_scopes()?;
+            self.instructions.push(Instruction::Return {
+                first: start,
+                count: u16::MAX,
+            });
+            return Ok(());
+        }
         let written = self.compile_value_list_into(
             start,
             &return_stmt.values,
@@ -592,7 +621,9 @@ impl<'a> FunctionCompiler<'a> {
             return self.store_name_target(target, first_prefix, closure);
         }
 
-        let prefix = if name.prefix.len() > 1 {
+        let prefix = if name.method.is_some() {
+            self.compile_name_prefix(&name.prefix, name.span)?
+        } else if name.prefix.len() > 1 {
             let (_, prefix_names) = name
                 .prefix
                 .split_last()
@@ -671,6 +702,9 @@ impl<'a> FunctionCompiler<'a> {
         names: &[crate::ast::AttributedName],
         values: &[Expr],
     ) -> KResult<()> {
+        if values.is_empty() {
+            return Ok(());
+        }
         let start = Register::new(self.next_temp);
         let written = self.compile_value_list_into(start, values, Some(names.len()), false)?;
         for (index, name) in names.iter().enumerate() {
@@ -832,9 +866,22 @@ impl<'a> FunctionCompiler<'a> {
             Expr::Table { constructor, .. } => {
                 self.instructions.push(Instruction::NewTable { dst });
                 let mut array_index = 1i64;
-                for field in &constructor.fields {
+                for (field_index, field) in constructor.fields.iter().enumerate() {
                     match field {
                         TableField::Array { value, .. } => {
+                            let expands = field_index + 1 == constructor.fields.len()
+                                && matches!(value, Expr::Call { .. } | Expr::Vararg { .. });
+                            if expands {
+                                let values = self.alloc_temp()?;
+                                self.compile_expr_into(values, value, usize::MAX)?;
+                                self.instructions.push(Instruction::SetTableRange {
+                                    table: dst,
+                                    start: array_index,
+                                    values,
+                                    count: None,
+                                });
+                                continue;
+                            }
                             let key = self.compile_expr_result(&Expr::Number {
                                 span: constructor.span,
                                 lexeme: array_index.to_string(),
@@ -1134,10 +1181,40 @@ impl<'a> FunctionCompiler<'a> {
         };
         self.reserve_temp_floor(layout_floor)?;
         if tailcall {
-            if call.method.is_some() {
-                return Err(KError::bytecode(
-                    "tail calls do not support method syntax yet",
-                ));
+            if let Some(method) = &call.method {
+                let receiver = Register::new(
+                    dst.index()
+                        .checked_add(1)
+                        .ok_or_else(|| KError::bytecode("register overflow"))?,
+                );
+                let key = Register::new(
+                    dst.index()
+                        .checked_add(2)
+                        .ok_or_else(|| KError::bytecode("register overflow"))?,
+                );
+                let prefix = self.compile_expr_result(&call.prefix)?;
+                self.emit_move(receiver, prefix)?;
+                let key_index = self.string_constant_index(method.as_bytes().to_vec())?;
+                self.instructions.push(Instruction::LoadConstant {
+                    dst: key,
+                    constant: ConstantIndex::new(key_index),
+                });
+                self.instructions.push(Instruction::GetTable {
+                    dst,
+                    table: receiver,
+                    key,
+                });
+                let arg_count = self.compile_call_args(key, &call.args, true)?;
+                self.instructions.push(Instruction::TailCall {
+                    function: dst,
+                    args: if arg_count == usize::MAX {
+                        u16::MAX
+                    } else {
+                        u16::try_from(arg_count + 1)
+                            .map_err(|_| KError::bytecode("tail call arity exceeds u16"))?
+                    },
+                });
+                return Ok(0);
             }
             let prefix = self.compile_expr_result(&call.prefix)?;
             self.emit_move(dst, prefix)?;
@@ -1148,7 +1225,7 @@ impl<'a> FunctionCompiler<'a> {
                         .ok_or_else(|| KError::bytecode("register overflow"))?,
                 ),
                 &call.args,
-                false,
+                true,
             )?;
             self.instructions.push(Instruction::TailCall {
                 function: dst,

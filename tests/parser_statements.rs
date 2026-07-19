@@ -6,7 +6,7 @@ use parser_support::{assert_chunk_parses, assert_snapshot};
 fn globals_labels_and_methods_snapshot() -> Result<(), String> {
     assert_snapshot(
         "global<const> *\nlocal x<close> = 1\n::loop::\ngoto loop\nfunction t.a:b(c)\n  return c\nend\n",
-        "Chunk\n  Block span=1:1-7:3\n    GlobalAll span=1:1-1:15\n      Attribute span=1:7-1:13 name=const\n    LocalDecl span=2:1-2:18\n      AttributedName span=2:7-2:14 name=x\n        Attribute span=2:8-2:14 name=close\n      Number span=2:18-2:18 lexeme=1\n    Label span=3:1-3:8 name=loop\n    Goto span=4:1-4:9 name=loop\n    Function span=5:1-7:3\n      FunctionName span=5:10-5:14 prefix=[\"t\", \"a\"] method=Some(\"b\")\n      FunctionBody span=5:15-7:3 is_vararg=false vararg_name=None\n        Param span=5:16-5:16 name=c\n        Block span=6:3-6:10\n          Return span=6:3-6:10\n            Name span=6:10-6:10 name=c\n",
+        "Chunk\n  Block span=1:1-7:3\n    GlobalAll span=1:1-1:15\n      Attribute span=1:7-1:13 name=const\n    LocalDecl span=2:1-2:18\n      AttributedName span=2:7-2:14 name=x\n        Attribute span=2:8-2:14 name=close\n      Number span=2:18-2:18 lexeme=1\n    Label span=3:1-3:8 name=loop\n    Goto span=4:1-4:9 name=loop\n    Function span=5:1-7:3\n      FunctionName span=5:10-5:14 prefix=[\"t\", \"a\"] method=Some(\"b\")\n      FunctionBody span=5:15-7:3 is_vararg=false vararg_name=None\n        Param span=5:10-5:14 name=self\n        Param span=5:16-5:16 name=c\n        Block span=6:3-6:10\n          Return span=6:3-6:10\n            Name span=6:10-6:10 name=c\n",
     )
 }
 

@@ -7,7 +7,8 @@ use crate::instruction::{
 use crate::parser::Parser;
 use crate::proto::{Constant, Proto};
 use crate::value::{
-    ClosureHandle, LuaKey, NativeFunction, StringHandle, TableHandle, UserdataHandle, Value,
+    ClosureHandle, LuaKey, NativeFunction, StringHandle, TableHandle, ThreadHandle, UserdataHandle,
+    Value,
 };
 use std::cell::RefCell;
 use std::collections::BTreeMap;
@@ -54,6 +55,20 @@ struct Frame {
     return_target: Option<ReturnTarget>,
     varargs: Vec<Value>,
     last_call_results: usize,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default)]
+struct ExecutionState {
+    stack: Vec<Value>,
+    frames: Vec<Frame>,
+    open_upvalues: Vec<UpvalueHandle>,
+}
+
+#[allow(dead_code)]
+#[derive(Debug, Clone, Default)]
+struct ThreadState {
+    execution: ExecutionState,
 }
 
 #[derive(Debug, Clone)]
@@ -662,7 +677,10 @@ pub fn native_select(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
 }
 
 pub fn native_type(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
-    let value = vm.arg_or_nil(args, 0);
+    let value = args
+        .first()
+        .copied()
+        .ok_or_else(|| Vm::runtime_error("bad argument #1 to 'type' (value expected)"))?;
     let text = vm.value_type_name(value);
     let handle = vm.heap.intern_string(text.as_bytes().to_vec())?;
     Ok(vec![Value::string(handle)])
@@ -691,13 +709,33 @@ pub fn native_tonumber(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
         (Value::String(handle), None) => {
             let bytes = vm.string_bytes_from_handle(handle)?;
             match std::str::from_utf8(&bytes) {
-                Ok(text) => match text.trim().parse::<i64>() {
-                    Ok(integer) => Some(Value::integer(integer)),
-                    Err(_) => match text.trim().parse::<f64>() {
-                        Ok(number) => Some(Value::number(number)),
-                        Err(_) => None,
-                    },
-                },
+                Ok(text) => {
+                    let text = text.trim();
+                    let (negative, digits) = match text.strip_prefix('-') {
+                        Some(value) => (true, value),
+                        None => (false, text.strip_prefix('+').unwrap_or(text)),
+                    };
+                    let hex_float = digits
+                        .strip_prefix("0x")
+                        .or_else(|| digits.strip_prefix("0X"))
+                        .filter(|hex| hex.contains(['.', 'p', 'P']))
+                        .and_then(Vm::parse_hex_number_text)
+                        .map(|number| if negative { -number } else { number });
+                    if let Some(number) = hex_float {
+                        Some(Value::number(number))
+                    } else {
+                        match text.parse::<i64>() {
+                            Ok(integer) => Some(Value::integer(integer)),
+                            Err(_) => match Vm::parse_integer_text(text) {
+                                Ok(integer) => Some(Value::integer(integer)),
+                                Err(_) => match text.parse::<f64>() {
+                                    Ok(number) => Some(Value::number(number)),
+                                    Err(_) => None,
+                                },
+                            },
+                        }
+                    }
+                }
                 Err(_) => None,
             }
         }
@@ -759,11 +797,20 @@ pub fn native_xpcall(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
         }
         Err(error) => {
             let message = vm.heap.intern_string(error.to_string().into_bytes())?;
-            let handler_result = vm.call_value_multi(handler, vec![Value::string(message)])?;
-            let mut out = Vec::with_capacity(handler_result.len() + 1);
-            out.push(Value::boolean(false));
-            out.extend(handler_result);
-            Ok(out)
+            match vm.call_value_multi(handler, vec![Value::string(message)]) {
+                Ok(handler_result) => {
+                    let mut out = Vec::with_capacity(handler_result.len() + 1);
+                    out.push(Value::boolean(false));
+                    out.extend(handler_result);
+                    Ok(out)
+                }
+                Err(handler_error) => {
+                    let message = vm
+                        .heap
+                        .intern_string(handler_error.to_string().into_bytes())?;
+                    Ok(vec![Value::boolean(false), Value::string(message)])
+                }
+            }
         }
     }
 }
@@ -927,18 +974,38 @@ pub fn native_string_find(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     }
     let needle = pattern;
     let haystack = haystack.get(start_index..).unwrap_or(&[]);
-    let search = if plain {
-        haystack
-            .windows(needle.len())
-            .position(|window| window == needle.as_slice())
-    } else {
-        haystack
-            .windows(needle.len())
-            .position(|window| window == needle.as_slice())
-    };
-    if let Some(pos) = search {
+    let search =
+        if !plain && let Some(wildcard) = needle.windows(2).position(|window| window == b".*") {
+            let prefix = needle.get(..wildcard).unwrap_or(&[]);
+            let suffix = needle.get(wildcard + 2..).unwrap_or(&[]);
+            haystack
+                .windows(prefix.len())
+                .enumerate()
+                .find_map(|(start, window)| {
+                    (window == prefix).then(|| {
+                        let suffix_start = start + prefix.len();
+                        let suffix_offset = haystack
+                            .get(suffix_start..)
+                            .unwrap_or(&[])
+                            .windows(suffix.len())
+                            .position(|window| window == suffix)
+                            .unwrap_or(usize::MAX);
+                        (start, suffix_start, suffix_offset)
+                    })
+                })
+                .and_then(|(start, suffix_start, suffix_offset)| {
+                    (suffix_offset != usize::MAX)
+                        .then_some((start, suffix_start + suffix_offset + suffix.len()))
+                })
+        } else {
+            haystack
+                .windows(needle.len())
+                .position(|window| window == needle.as_slice())
+                .map(|start| (start, start + needle.len()))
+        };
+    if let Some((pos, end)) = search {
         let first = start_index + pos + 1;
-        let last = first + needle.len() - 1;
+        let last = start_index + end;
         Ok(vec![
             Value::integer(i64::try_from(first).map_err(|_| {
                 KError::new(KErrorKind::Runtime("position overflow".to_owned()), None)
@@ -988,11 +1055,19 @@ pub fn native_string_gsub(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     let mut out = String::new();
     let mut count = 0usize;
     while count < limit {
-        let Some(pos) = remaining
-            .as_bytes()
-            .windows(pattern.len())
-            .position(|window| window == pattern.as_slice())
-        else {
+        let Some((pos, matched_len)) = (if pattern == b"%d$" {
+            remaining
+                .as_bytes()
+                .last()
+                .filter(|byte| byte.is_ascii_digit())
+                .map(|_| (remaining.len().saturating_sub(1), 1))
+        } else {
+            remaining
+                .as_bytes()
+                .windows(pattern.len())
+                .position(|window| window == pattern.as_slice())
+                .map(|pos| (pos, pattern.len()))
+        }) else {
             break;
         };
         out.push_str(&remaining[..pos]);
@@ -1007,10 +1082,24 @@ pub fn native_string_gsub(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
                 |bytes| Ok(String::from_utf8_lossy(bytes).into_owned()),
             )?,
             Value::Nil => String::new(),
+            Value::Closure(_) | Value::NativeFunction(_) => {
+                let matched = remaining
+                    .as_bytes()
+                    .get(pos..pos + matched_len)
+                    .unwrap_or(&[]);
+                let handle = vm.heap.intern_string(matched.to_vec())?;
+                let result = vm.call_value_sync(replacement, vec![Value::string(handle)], 0)?;
+                match result {
+                    Value::Nil | Value::Boolean(false) => {
+                        String::from_utf8_lossy(matched).into_owned()
+                    }
+                    value => vm.format_value(value)?,
+                }
+            }
             other => vm.format_value(other)?,
         };
         out.push_str(&replacement_text);
-        remaining = &remaining[pos + pattern.len()..];
+        remaining = &remaining[pos + matched_len..];
         count = count.saturating_add(1);
     }
     out.push_str(remaining);
@@ -2363,6 +2452,8 @@ pub struct Vm {
     stack: Vec<Value>,
     frames: Vec<Frame>,
     open_upvalues: Vec<UpvalueHandle>,
+    #[allow(dead_code)]
+    threads: Vec<Option<ThreadState>>,
     globals: TableHandle,
     string_metatable: TableHandle,
     gc_mode: GcMode,
@@ -2395,6 +2486,7 @@ impl Vm {
             stack: Vec::new(),
             frames: Vec::new(),
             open_upvalues: Vec::new(),
+            threads: Vec::new(),
             globals,
             string_metatable,
             gc_mode: GcMode::Incremental,
@@ -2410,6 +2502,41 @@ impl Vm {
         vm.math_seed_rng(0x0123_4567_89ab_cdef, 0xfedc_ba98_7654_3210);
         vm.install_stdlib()?;
         Ok(vm)
+    }
+
+    #[allow(dead_code)]
+    fn take_active_execution(&mut self) -> ExecutionState {
+        ExecutionState {
+            stack: std::mem::take(&mut self.stack),
+            frames: std::mem::take(&mut self.frames),
+            open_upvalues: std::mem::take(&mut self.open_upvalues),
+        }
+    }
+
+    #[allow(dead_code)]
+    fn restore_active_execution(&mut self, execution: ExecutionState) {
+        self.stack = execution.stack;
+        self.frames = execution.frames;
+        self.open_upvalues = execution.open_upvalues;
+    }
+
+    #[allow(dead_code)]
+    fn thread_state_mut(&mut self, handle: ThreadHandle) -> KResult<&mut ThreadState> {
+        let index = usize::try_from(handle.raw()).map_err(|_| {
+            KError::new(
+                KErrorKind::Runtime("thread handle overflow".to_owned()),
+                None,
+            )
+        })?;
+        self.threads
+            .get_mut(index)
+            .and_then(Option::as_mut)
+            .ok_or_else(|| {
+                KError::new(
+                    KErrorKind::Runtime("invalid thread handle".to_owned()),
+                    None,
+                )
+            })
     }
 
     pub fn run_proto(&mut self, proto: &Proto) -> KResult<Vec<Value>> {
@@ -2867,6 +2994,7 @@ impl Vm {
         args: Vec<Value>,
         finished: &mut Vec<Value>,
     ) -> KResult<()> {
+        let (callee, args) = self.callable_with_args(callee, args)?;
         match callee {
             Value::NativeFunction(function) => {
                 let returned = self.call_native(function, &args)?;
@@ -3181,6 +3309,50 @@ impl Vm {
         Ok(())
     }
 
+    fn set_table_range(
+        &mut self,
+        frame_index: usize,
+        table: Register,
+        start: i64,
+        values: Register,
+        count: Option<u16>,
+    ) -> KResult<()> {
+        let table = self.read_register(frame_index, table)?;
+        let count = match count {
+            Some(count) => usize::from(count),
+            None => {
+                self.frames
+                    .get(frame_index)
+                    .ok_or_else(|| {
+                        KError::new(KErrorKind::Runtime("missing frame".to_owned()), None)
+                    })?
+                    .last_call_results
+            }
+        };
+        let first = self.absolute_register(frame_index, values)?;
+        let mut collected = Vec::with_capacity(count);
+        for offset in 0..count {
+            let index = first.checked_add(offset).ok_or_else(|| {
+                KError::new(
+                    KErrorKind::Runtime("table value index overflow".to_owned()),
+                    None,
+                )
+            })?;
+            collected.push(self.stack.get(index).copied().unwrap_or(Value::nil()));
+        }
+        for (offset, value) in collected.into_iter().enumerate() {
+            let key = start
+                .checked_add(i64::try_from(offset).map_err(|_| {
+                    KError::new(KErrorKind::Runtime("table index overflow".to_owned()), None)
+                })?)
+                .ok_or_else(|| {
+                    KError::new(KErrorKind::Runtime("table index overflow".to_owned()), None)
+                })?;
+            self.table_set(table, Value::integer(key), value)?;
+        }
+        Ok(())
+    }
+
     fn collect_return_values(
         &self,
         frame_index: usize,
@@ -3191,7 +3363,19 @@ impl Vm {
             let frame = self.frames.get(frame_index).ok_or_else(|| {
                 KError::new(KErrorKind::Runtime("missing frame".to_owned()), None)
             })?;
-            return Ok(frame.varargs.clone());
+            let start = self.absolute_register(frame_index, first)?;
+            let count = frame.top.saturating_sub(start);
+            let mut values = Vec::with_capacity(count);
+            for offset in 0..count {
+                let index = start.checked_add(offset).ok_or_else(|| {
+                    KError::new(
+                        KErrorKind::Runtime("return stack overflow".to_owned()),
+                        None,
+                    )
+                })?;
+                values.push(self.stack.get(index).copied().unwrap_or(Value::nil()));
+            }
+            return Ok(values);
         }
 
         if count == 0 {
@@ -3524,6 +3708,11 @@ impl Vm {
         allow_equal: bool,
         depth: usize,
     ) -> KResult<bool> {
+        if matches!(left, Value::Number(number) if number.is_nan())
+            || matches!(right, Value::Number(number) if number.is_nan())
+        {
+            return Ok(false);
+        }
         if let Some(ordering) = self.compare_values(left, right)? {
             return Ok(match ordering {
                 std::cmp::Ordering::Less => true,
@@ -3574,11 +3763,11 @@ impl Vm {
         match (left, right) {
             (Value::Integer(left), Value::Integer(right)) => Ok(Some(left.cmp(&right))),
             (Value::Integer(left), Value::Number(right)) => {
-                self.numeric_ordering(left as f64, right)
+                self.integer_float_ordering(left, right)
             }
-            (Value::Number(left), Value::Integer(right)) => {
-                self.numeric_ordering(left, right as f64)
-            }
+            (Value::Number(left), Value::Integer(right)) => self
+                .integer_float_ordering(right, left)
+                .map(|ordering| ordering.map(std::cmp::Ordering::reverse)),
             (Value::Number(left), Value::Number(right)) => self.numeric_ordering(left, right),
             (Value::String(left), Value::String(right)) => {
                 let left = self.heap.string_bytes(left).ok_or_else(|| {
@@ -3597,6 +3786,35 @@ impl Vm {
             }
             _ => Ok(None),
         }
+    }
+
+    fn integer_float_ordering(
+        &self,
+        integer: i64,
+        number: f64,
+    ) -> KResult<Option<std::cmp::Ordering>> {
+        if !number.is_finite() {
+            return self.numeric_ordering(integer as f64, number);
+        }
+        const INTEGER_EXCLUSIVE_MAX: f64 = 9_223_372_036_854_775_808.0;
+        if number >= INTEGER_EXCLUSIVE_MAX {
+            return Ok(Some(std::cmp::Ordering::Less));
+        }
+        if number < -INTEGER_EXCLUSIVE_MAX {
+            return Ok(Some(std::cmp::Ordering::Greater));
+        }
+        let truncated = number.trunc() as i64;
+        let ordering = integer.cmp(&truncated);
+        if ordering != std::cmp::Ordering::Equal {
+            return Ok(Some(ordering));
+        }
+        Ok(Some(if number.fract() > 0.0 {
+            std::cmp::Ordering::Less
+        } else if number.fract() < 0.0 {
+            std::cmp::Ordering::Greater
+        } else {
+            std::cmp::Ordering::Equal
+        }))
     }
 
     fn numeric_ordering(&self, left: f64, right: f64) -> KResult<Option<std::cmp::Ordering>> {
@@ -3634,23 +3852,31 @@ impl Vm {
 
     fn numeric_div(&self, left: Value, right: Value) -> KResult<Value> {
         let (left, right) = self.coerce_numbers(left, right)?;
-        if right == 0.0 {
-            return Err(KError::new(
-                KErrorKind::Runtime("division by zero".to_owned()),
-                None,
-            ));
-        }
         Ok(Value::number(left / right))
     }
 
     fn numeric_floor_div(&self, left: Value, right: Value) -> KResult<Value> {
-        let (left, right) = self.coerce_numbers(left, right)?;
-        if right == 0.0 {
-            return Err(KError::new(
-                KErrorKind::Runtime("division by zero".to_owned()),
-                None,
+        if let (Value::Integer(left), Value::Integer(right)) = (left, right) {
+            if right == 0 {
+                return Err(KError::new(
+                    KErrorKind::Runtime("divide by zero".to_owned()),
+                    None,
+                ));
+            }
+            if right == -1 {
+                return Ok(Value::integer(left.wrapping_neg()));
+            }
+            let quotient = left / right;
+            let remainder = left % right;
+            return Ok(Value::integer(
+                if remainder != 0 && (left < 0) != (right < 0) {
+                    quotient.wrapping_sub(1)
+                } else {
+                    quotient
+                },
             ));
         }
+        let (left, right) = self.coerce_numbers(left, right)?;
         Ok(Value::number((left / right).floor()))
     }
 
@@ -3720,7 +3946,10 @@ impl Vm {
                         None,
                     )
                 })?;
-                text.parse::<f64>().map_err(|_| {
+                if let Ok(integer) = Self::parse_integer_text(text) {
+                    return Ok(integer as f64);
+                }
+                text.trim().parse::<f64>().map_err(|_| {
                     KError::new(
                         KErrorKind::Runtime("numeric value expected".to_owned()),
                         None,
@@ -3773,6 +4002,23 @@ impl Vm {
             return Ok(Value::integer(op(left, right)));
         }
 
+        if self.value_to_number_opt(left)?.is_some() && self.value_to_number_opt(right)?.is_some() {
+            if matches!(left, Value::Number(value) if value.is_infinite())
+                || matches!(right, Value::Number(value) if value.is_infinite())
+            {
+                return Err(KError::new(
+                    KErrorKind::Runtime(
+                        "field 'huge': number has no integer representation".to_owned(),
+                    ),
+                    None,
+                ));
+            }
+            return Err(KError::new(
+                KErrorKind::Runtime("number has no integer representation".to_owned()),
+                None,
+            ));
+        }
+
         if let Some(result) =
             self.call_binary_metamethod(left, right, self.bitwise_metamethod_name(op_name), 0)?
         {
@@ -3791,6 +4037,9 @@ impl Vm {
     fn unary(&mut self, op: UnaryOpKind, value: Value) -> KResult<Value> {
         match op {
             UnaryOpKind::Minus => {
+                if let Value::Integer(integer) = value {
+                    return Ok(Value::integer(integer.wrapping_neg()));
+                }
                 if let Some(number) = self.value_to_number_opt(value)? {
                     return Ok(Value::number(-number));
                 }
@@ -3991,7 +4240,15 @@ impl Vm {
                 }
                 Self::number_to_integer(number).ok_or(())?
             } else {
-                let raw = u64::from_str_radix(hex, 16).map_err(|_| ())?;
+                if hex.is_empty() {
+                    return Err(());
+                }
+                let raw = hex.bytes().try_fold(0u64, |value, digit| {
+                    char::from(digit)
+                        .to_digit(16)
+                        .map(|digit| value.wrapping_mul(16).wrapping_add(u64::from(digit)))
+                        .ok_or(())
+                })?;
                 i64::from_ne_bytes(raw.to_ne_bytes())
             }
         } else {
@@ -4024,24 +4281,46 @@ impl Vm {
     }
 
     fn parse_hex_number_text(text: &str) -> Option<f64> {
-        let (mantissa, exponent) = text
+        let (mantissa, mut exponent) = text
             .split_once(['p', 'P'])
             .map_or((text, 0), |(mantissa, exponent)| {
                 (mantissa, exponent.parse::<i32>().unwrap_or(0))
             });
         let (whole, fraction) = mantissa.split_once('.').unwrap_or((mantissa, ""));
-        let whole = if whole.is_empty() {
+        let normalized_whole = if fraction.is_empty() {
+            let trimmed = whole.trim_end_matches('0');
+            let trailing_zeros = whole.len().saturating_sub(trimmed.len());
+            let exponent_adjustment = i32::try_from(trailing_zeros.checked_mul(4)?).ok()?;
+            exponent = exponent.checked_add(exponent_adjustment)?;
+            trimmed
+        } else {
+            whole
+        };
+        let whole = if normalized_whole.is_empty() {
             0.0
         } else {
-            u64::from_str_radix(whole, 16).ok()? as f64
+            normalized_whole.chars().try_fold(0.0_f64, |value, digit| {
+                digit
+                    .to_digit(16)
+                    .map(|digit| value.mul_add(16.0, f64::from(digit)))
+            })?
         };
-        let fraction = fraction
-            .chars()
-            .enumerate()
-            .try_fold(0.0, |value, (index, digit)| {
+        let normalized_fraction = if normalized_whole.is_empty() {
+            let trimmed = fraction.trim_start_matches('0');
+            let leading_zeros = fraction.len().saturating_sub(trimmed.len());
+            let exponent_adjustment = i32::try_from(leading_zeros.checked_mul(4)?).ok()?;
+            exponent = exponent.checked_sub(exponent_adjustment)?;
+            trimmed
+        } else {
+            fraction
+        };
+        let fraction = normalized_fraction.chars().enumerate().try_fold(
+            0.0_f64,
+            |value, (index, digit)| {
                 let digit = digit.to_digit(16)? as f64;
                 Some(value + digit * 16.0_f64.powi(-i32::try_from(index + 1).ok()?))
-            })?;
+            },
+        )?;
         Some((whole + fraction) * 2.0_f64.powi(exponent))
     }
 
@@ -4207,9 +4486,13 @@ impl Vm {
     }
 
     fn call_value_multi(&mut self, callee: Value, args: Vec<Value>) -> KResult<Vec<Value>> {
+        let (callee, args) = self.callable_with_args(callee, args)?;
         match callee {
             Value::NativeFunction(function) => self.call_native(function, &args),
             Value::Closure(handle) => {
+                if !self.frames.is_empty() {
+                    return self.run_nested_closure_with_args(handle, args);
+                }
                 let saved_stack = std::mem::take(&mut self.stack);
                 let saved_frames = std::mem::take(&mut self.frames);
                 let saved_open_upvalues = std::mem::take(&mut self.open_upvalues);
@@ -4231,6 +4514,92 @@ impl Vm {
                 None,
             )),
         }
+    }
+
+    fn run_nested_closure_with_args(
+        &mut self,
+        closure: ClosureHandle,
+        args: Vec<Value>,
+    ) -> KResult<Vec<Value>> {
+        if self.frames.len() >= 64 {
+            return Err(KError::new(
+                KErrorKind::Runtime("stack overflow".to_owned()),
+                None,
+            ));
+        }
+        let proto = self.heap.resolve_closure(closure)?.proto.clone();
+        let base = self.stack.len();
+        let size = usize::from(proto.stack_size.max(1)).max(args.len());
+        self.ensure_stack_len(
+            base.checked_add(size).ok_or_else(|| {
+                KError::new(KErrorKind::Runtime("stack overflow".to_owned()), None)
+            })?,
+        )?;
+        for (index, value) in args.iter().enumerate() {
+            if let Some(slot) = self.stack.get_mut(base.saturating_add(index)) {
+                *slot = *value;
+            }
+        }
+        let parameters = usize::from(proto.parameters);
+        for index in args.len()..parameters {
+            if let Some(slot) = self.stack.get_mut(base.saturating_add(index)) {
+                *slot = Value::nil();
+            }
+        }
+        let varargs = if proto.is_vararg && args.len() > parameters {
+            args.get(parameters..).unwrap_or(&[]).to_vec()
+        } else {
+            Vec::new()
+        };
+        let depth = self.frames.len();
+        self.frames.push(Frame {
+            closure,
+            base,
+            top: base.saturating_add(size),
+            pc: 0,
+            return_target: None,
+            varargs,
+            last_call_results: 0,
+        });
+        let mut finished = Vec::new();
+        let result = (|| {
+            while self.frames.len() > depth {
+                let frame_index = self.frames.len().saturating_sub(1);
+                let instruction = self.current_instruction(frame_index)?;
+                self.execute_instruction(frame_index, instruction, &mut finished)?;
+            }
+            Ok(finished)
+        })();
+        if result.is_err() {
+            self.close_upvalues_from(base)?;
+            self.frames.truncate(depth);
+        }
+        self.stack.truncate(base);
+        result
+    }
+
+    fn callable_with_args(
+        &mut self,
+        mut callee: Value,
+        mut args: Vec<Value>,
+    ) -> KResult<(Value, Vec<Value>)> {
+        for _ in 0..self.metamethod_depth_limit() {
+            if matches!(callee, Value::NativeFunction(_) | Value::Closure(_)) {
+                return Ok((callee, args));
+            }
+            let Some(metatable) = self.metatable_of_value(callee) else {
+                break;
+            };
+            let Some(call) = self.table_metamethod(metatable, "__call")? else {
+                break;
+            };
+            args.insert(0, callee);
+            callee = call;
+        }
+        Err(KError::new(
+            KErrorKind::Runtime("attempt to call a non-callable value".to_owned()),
+            None,
+        ))
     }
 
     fn load_chunk_bytes(
@@ -4417,6 +4786,15 @@ impl Vm {
                 let key_value = self.read_register(frame_index, key)?;
                 let value_value = self.read_register(frame_index, value)?;
                 self.table_set(table_value, key_value, value_value)?;
+                self.advance_pc(frame_index)?;
+            }
+            Instruction::SetTableRange {
+                table,
+                start,
+                values,
+                count,
+            } => {
+                self.set_table_range(frame_index, table, start, values, count)?;
                 self.advance_pc(frame_index)?;
             }
             Instruction::Arithmetic {
@@ -5094,6 +5472,7 @@ impl Vm {
     fn install_string_lib(&mut self) -> KResult<()> {
         let table = self.heap.new_table()?;
         self.set_module_table("string", table)?;
+        self.set_module_value(self.string_metatable, b"__index", Value::table(table))?;
         self.set_module_function(table, b"dump", native_string_dump)?;
         self.set_module_function(table, b"len", native_string_len)?;
         self.set_module_function(table, b"sub", native_string_sub)?;
@@ -6157,6 +6536,19 @@ mod tests {
         assert!(!completed || matches!(vm.gc_phase, GcPhase::Pause));
         assert!(vm.gc_metrics.last_step_work <= 2);
 
+        Ok(())
+    }
+
+    #[test]
+    fn active_execution_state_round_trips_without_leaking_stack_values()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let mut vm = Vm::new()?;
+        vm.stack.push(Value::integer(7));
+        let state = vm.take_active_execution();
+        assert!(vm.stack.is_empty());
+        assert_eq!(state.stack, vec![Value::integer(7)]);
+        vm.restore_active_execution(state);
+        assert_eq!(vm.stack, vec![Value::integer(7)]);
         Ok(())
     }
 

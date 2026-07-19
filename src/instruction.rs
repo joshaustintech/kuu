@@ -242,6 +242,12 @@ pub enum Instruction {
         key: Register,
         value: Register,
     },
+    SetTableRange {
+        table: Register,
+        start: i64,
+        values: Register,
+        count: Option<u16>,
+    },
     Arithmetic {
         op: ArithmeticOp,
         dst: Register,
@@ -351,6 +357,7 @@ enum Opcode {
     JumpIfFalse = 25,
     TailCall = 26,
     Unary = 27,
+    SetTableRange = 28,
 }
 
 impl Opcode {
@@ -384,6 +391,7 @@ impl Opcode {
             25 => Ok(Self::JumpIfFalse),
             26 => Ok(Self::TailCall),
             27 => Ok(Self::Unary),
+            28 => Ok(Self::SetTableRange),
             _ => Err(KError::bytecode(format!("unknown opcode {value}"))),
         }
     }
@@ -457,6 +465,24 @@ impl Instruction {
                 write_register(writer, *table);
                 write_register(writer, *key);
                 write_register(writer, *value);
+            }
+            Self::SetTableRange {
+                table,
+                start,
+                values,
+                count,
+            } => {
+                writer.write_u8(Opcode::SetTableRange as u8);
+                write_register(writer, *table);
+                writer.write_i64(*start);
+                write_register(writer, *values);
+                match count {
+                    Some(count) => {
+                        writer.write_bool(true);
+                        writer.write_u16(*count);
+                    }
+                    None => writer.write_bool(false),
+                }
             }
             Self::Arithmetic {
                 op,
@@ -618,6 +644,16 @@ impl Instruction {
                 table: read_register(reader)?,
                 key: read_register(reader)?,
                 value: read_register(reader)?,
+            }),
+            Opcode::SetTableRange => Ok(Self::SetTableRange {
+                table: read_register(reader)?,
+                start: reader.read_i64()?,
+                values: read_register(reader)?,
+                count: if reader.read_bool()? {
+                    Some(reader.read_u16()?)
+                } else {
+                    None
+                },
             }),
             Opcode::Arithmetic => Ok(Self::Arithmetic {
                 op: ArithmeticOp::from_tag(reader.read_u8()?)?,

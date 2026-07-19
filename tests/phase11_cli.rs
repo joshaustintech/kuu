@@ -74,6 +74,186 @@ fn integer_overflow_wraps() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn arithmetic_coerces_whitespace_padded_numeric_strings() -> Result<(), Box<dyn std::error::Error>>
+{
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "print('2' + ' 3e0 ', '10' - ' 10  ', -'  10 ')".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+
+    let expected = ExpectedRun {
+        stdout: b"5\t0\t-10\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+
+    assert!(compare_run(&actual, &expected).is_ok());
+    Ok(())
+}
+
+#[test]
+fn arithmetic_accepts_tab_padding_but_rejects_internal_whitespace()
+-> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "print('\\t4\\t' + 1); print(pcall(function () return '1 2' + 1 end))".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+
+    assert!(actual.stdout.starts_with(b"5\nfalse\t"));
+    assert_eq!(actual.stderr, b"");
+    assert_eq!(actual.status.code(), Some(0));
+    Ok(())
+}
+
+#[test]
+fn method_closure_captures_shadowing_local_table() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "global<const> *; local a={i=10}; local self=20; function a:x(x) return x+self.i end; function a.y(x) return x+self end; a.t={i=-100}; a[\"t\"].x=function(self,a,b) return self.i+a+b end; do local a={x=0}; function a:add(x) self.x,a.y=self.x+x,20; return self end; local z=a:add(10):add(20):add(30); print(z.x,a.y) end".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+
+    let expected = ExpectedRun {
+        stdout: b"60\t20\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+
+    assert!(compare_run(&actual, &expected).is_ok());
+    Ok(())
+}
+
+#[test]
+fn tail_call_preserves_call_metamethod_receiver() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local function foo(self, x) return self, x end; local t = setmetatable({}, {__call = foo}); local function foo2(x) return t(x) end; local a, b = foo2(100); print(a == t, b)".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+
+    let expected = ExpectedRun {
+        stdout: b"true\t100\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+
+    assert!(compare_run(&actual, &expected).is_ok());
+    Ok(())
+}
+
+#[test]
+fn trailing_vararg_expands_inside_table_constructor() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local function foo(x, ...) local a = {...}; return x, a[1], a[2] end; print(foo(10, 100, 200))".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+
+    let expected = ExpectedRun {
+        stdout: b"10\t100\t200\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+
+    assert!(compare_run(&actual, &expected).is_ok());
+    Ok(())
+}
+
+#[test]
+fn non_trailing_vararg_stays_single_table_value() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local function f(...) local t = {..., 99}; print(t[1], t[2]) end; f(10, 20)"
+                .to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+
+    let expected = ExpectedRun {
+        stdout: b"10\t99\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+
+    assert!(compare_run(&actual, &expected).is_ok());
+    Ok(())
+}
+
+#[test]
+fn trailing_vararg_expands_after_fixed_return_value() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local function f(x, ...) return x, ... end; print(f(10, 100, 200))".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+
+    let expected = ExpectedRun {
+        stdout: b"10\t100\t200\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+
+    assert!(compare_run(&actual, &expected).is_ok());
+    Ok(())
+}
+
+#[test]
+fn tail_call_forwards_all_varargs() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local function sink(...) return ... end; local function forward(...) return sink(...) end; print(forward(10, 20, 30))".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+
+    let expected = ExpectedRun {
+        stdout: b"10\t20\t30\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+
+    assert!(compare_run(&actual, &expected).is_ok());
+    Ok(())
+}
+
+#[test]
+fn protected_recursive_closure_keeps_open_upvalues_valid() -> Result<(), Box<dyn std::error::Error>>
+{
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local function loop() assert(pcall(loop)) end; local ok, msg = xpcall(loop, loop); print(not ok, string.find(msg, 'error') ~= nil)".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+
+    let expected = ExpectedRun {
+        stdout: b"true\ttrue\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+
+    assert!(compare_run(&actual, &expected).is_ok());
+    Ok(())
+}
+
+#[test]
 fn omitted_function_parameters_are_nil() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
         args: vec![
@@ -85,6 +265,59 @@ fn omitted_function_parameters_are_nil() -> Result<(), Box<dyn std::error::Error
 
     let expected = ExpectedRun {
         stdout: b"true\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+
+    assert!(compare_run(&actual, &expected).is_ok());
+    Ok(())
+}
+
+#[test]
+fn tail_method_call_passes_receiver() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local a = { value = 40 }; function a:add(n) return self.value + n end; local function f() return a:add(2) end; print(f())".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+
+    let expected = ExpectedRun {
+        stdout: b"42\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+
+    assert!(compare_run(&actual, &expected).is_ok());
+    Ok(())
+}
+
+#[test]
+fn type_requires_a_value_argument() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec!["-e".to_owned(), "print(pcall(type))".to_owned()],
+        ..RunOptions::default()
+    })?;
+
+    assert!(actual.stdout.starts_with(b"false\t"));
+    assert_eq!(actual.stderr, b"");
+    assert_eq!(actual.status.code(), Some(0));
+    Ok(())
+}
+
+#[test]
+fn dotted_method_declaration_installs_on_full_prefix() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local a = { b = { c = {} } }; function a.b.c:set(key, value) self[key] = value end; a.b.c:set('answer', 42); print(a.b.c.answer)".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+
+    let expected = ExpectedRun {
+        stdout: b"42\n",
         stderr: b"",
         exit_code: Some(0),
     };

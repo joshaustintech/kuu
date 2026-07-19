@@ -209,7 +209,7 @@ fn method_syntax_and_bytecode_encoding_roundtrip() -> Result<(), String> {
     assert_eq!(proto.nested.len(), 1);
     let nested = &proto.nested[0];
     assert_eq!(nested.name, Some(b"obj:inc".to_vec()));
-    assert_eq!(nested.parameters, 1);
+    assert_eq!(nested.parameters, 2);
     assert!(
         nested
             .instructions

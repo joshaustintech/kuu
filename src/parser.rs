@@ -429,7 +429,16 @@ impl<'a> Parser<'a> {
         let start = self.current.span;
         self.consume_keyword(Keyword::Function)?;
         let name = self.parse_function_name()?;
-        let body = self.parse_function_body()?;
+        let mut body = self.parse_function_body()?;
+        if name.method.is_some() {
+            body.parameters.insert(
+                0,
+                Param {
+                    span: name.span,
+                    name: "self".to_owned(),
+                },
+            );
+        }
         Ok(Stmt::Function {
             span: self.merge_span(start, body.span),
             name,
