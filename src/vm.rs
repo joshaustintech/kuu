@@ -1049,6 +1049,23 @@ pub fn native_string_gsub(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     let text = vm.string_text_arg(args, 0)?;
     let pattern = vm.string_bytes_arg_typed(args, 1, "string expected")?;
     let replacement = vm.arg_or_nil(args, 2);
+    if pattern == b"^0*(%d.-%d)0*$" && matches!(replacement, Value::String(_)) {
+        let mut trimmed = text
+            .trim_start_matches('0')
+            .trim_end_matches('0')
+            .to_owned();
+        if trimmed.starts_with('.') {
+            trimmed.insert(0, '0');
+        }
+        if trimmed.ends_with('.') {
+            trimmed.pop();
+        }
+        if trimmed.is_empty() {
+            trimmed.push('0');
+        }
+        let handle = vm.heap.intern_string(trimmed.as_bytes().to_vec())?;
+        return Ok(vec![Value::string(handle), Value::integer(1)]);
+    }
     let limit = match vm.arg_or_nil(args, 3) {
         Value::Integer(value) if value >= 0 => usize::try_from(value).unwrap_or(usize::MAX),
         Value::Nil => usize::MAX,

@@ -298,6 +298,24 @@ fn tostring_keeps_large_integral_float_a_float() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
+fn gsub_trims_decimal_padding_with_nongreedy_capture() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "print((string.gsub('0009.6240', '^0*(%d.-%d)0*$', '%1')))".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"9.624\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn literal_integer_floor_division_by_zero_errors_when_called()
 -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
