@@ -8,7 +8,9 @@ use crate::instruction::{
     UnaryOpKind,
 };
 use crate::proto::{Constant, Proto, UpvalueDescriptor};
-use crate::resolve::{BindingTarget, DeclarationKind, ResolvedFunction, Resolver as ScopeResolver};
+use crate::resolve::{
+    BindingTarget, DeclarationKind, EnvironmentTarget, ResolvedFunction, Resolver as ScopeResolver,
+};
 use std::collections::BTreeMap;
 
 #[derive(Debug, Default)]
@@ -65,8 +67,14 @@ struct LoopFrame {
 enum Target {
     Local(Register),
     Upvalue(u16),
-    Global(String),
-    Table { table: Register, key: Register },
+    Global {
+        name: String,
+        environment: EnvironmentTarget,
+    },
+    Table {
+        table: Register,
+        key: Register,
+    },
 }
 
 #[derive(Debug)]
@@ -780,7 +788,10 @@ impl<'a> FunctionCompiler<'a> {
                             u16::try_from(slot)
                                 .map_err(|_| KError::bytecode("upvalue slot exceeds u16"))?,
                         ),
-                        BindingTarget::Global { .. } => Target::Global(name.clone()),
+                        BindingTarget::Global { environment, .. } => Target::Global {
+                            name: name.clone(),
+                            environment,
+                        },
                     };
                     result.push(compiled);
                 }
@@ -1362,7 +1373,9 @@ impl<'a> FunctionCompiler<'a> {
                     .push(Instruction::GetUpvalue { dst, upvalue: slot });
                 Ok(())
             }
-            BindingTarget::Global { .. } => self.emit_get_global(name, dst),
+            BindingTarget::Global { environment, .. } => {
+                self.emit_get_environment(environment, name, dst)
+            }
         }
     }
 
@@ -1448,7 +1461,9 @@ impl<'a> FunctionCompiler<'a> {
                 });
                 Ok(())
             }
-            Target::Global(name) => self.emit_set_global(name, value),
+            Target::Global { name, environment } => {
+                self.emit_set_environment(environment.clone(), name, value)
+            }
             Target::Table { table, key } => {
                 self.instructions.push(Instruction::SetTable {
                     table: *table,
@@ -1476,6 +1491,54 @@ impl<'a> FunctionCompiler<'a> {
             name: ConstantIndex::new(index),
         });
         Ok(())
+    }
+
+    fn emit_get_environment(
+        &mut self,
+        environment: EnvironmentTarget,
+        name: &str,
+        dst: Register,
+    ) -> KResult<()> {
+        let table = self.alloc_temp()?;
+        self.load_environment(environment, table)?;
+        let key = self.load_string_temp(name.as_bytes().to_vec())?;
+        self.instructions
+            .push(Instruction::GetTable { dst, table, key });
+        Ok(())
+    }
+
+    fn emit_set_environment(
+        &mut self,
+        environment: EnvironmentTarget,
+        name: &str,
+        value: Register,
+    ) -> KResult<()> {
+        let table = self.alloc_temp()?;
+        self.load_environment(environment, table)?;
+        let key = self.load_string_temp(name.as_bytes().to_vec())?;
+        self.instructions
+            .push(Instruction::SetTable { table, key, value });
+        Ok(())
+    }
+
+    fn load_environment(&mut self, environment: EnvironmentTarget, dst: Register) -> KResult<()> {
+        match environment {
+            EnvironmentTarget::Local { slot } => self.emit_move(
+                dst,
+                Register::new(
+                    u16::try_from(slot)
+                        .map_err(|_| KError::bytecode("_ENV local slot exceeds u16"))?,
+                ),
+            ),
+            EnvironmentTarget::Upvalue { slot } => {
+                self.instructions.push(Instruction::GetUpvalue {
+                    dst,
+                    upvalue: u16::try_from(slot)
+                        .map_err(|_| KError::bytecode("_ENV upvalue slot exceeds u16"))?,
+                });
+                Ok(())
+            }
+        }
     }
 
     fn string_constant_index(&mut self, bytes: Vec<u8>) -> KResult<u32> {
@@ -1725,7 +1788,9 @@ impl<'a> FunctionCompiler<'a> {
                 });
                 Ok(())
             }
-            BindingTarget::Global { .. } => self.emit_set_global(name, value),
+            BindingTarget::Global { environment, .. } => {
+                self.emit_set_environment(environment, name, value)
+            }
         }
     }
 

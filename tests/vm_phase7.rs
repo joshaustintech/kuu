@@ -22,6 +22,24 @@ fn global_declaration_without_assignment_preserves_existing_global()
 }
 
 #[test]
+fn local_environment_redirects_global_accesses() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local function f() local _ENV <const> = 11; X = 'hi' end; local ok, message = pcall(f); print(ok, string.find(message, 'number') ~= nil)".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"false\ttrue\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn floating_division_by_zero_returns_ieee_values() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
         args: vec![

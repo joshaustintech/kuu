@@ -508,10 +508,6 @@ impl Resolver {
             ));
         }
 
-        if !state.visible_bindings.contains_key("_ENV") {
-            let _ = state.ensure_env_capture();
-        }
-
         state.record_use(name.to_owned(), span, is_write, binding.clone());
         Ok(binding)
     }

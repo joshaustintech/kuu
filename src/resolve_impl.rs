@@ -117,6 +117,7 @@ pub enum BindingTarget {
         explicit: bool,
         declaration_span: Option<KSpan>,
         block_depth: usize,
+        environment: EnvironmentTarget,
     },
     Upvalue {
         slot: usize,
@@ -124,6 +125,12 @@ pub enum BindingTarget {
         source_depth: usize,
         declaration_span: KSpan,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum EnvironmentTarget {
+    Local { slot: usize },
+    Upvalue { slot: usize },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,13 +175,18 @@ pub(crate) struct GlobalBinding {
 }
 
 impl GlobalBinding {
-    pub(crate) fn to_target(&self, explicit: bool) -> BindingTarget {
+    pub(crate) fn to_target(
+        &self,
+        explicit: bool,
+        environment: EnvironmentTarget,
+    ) -> BindingTarget {
         BindingTarget::Global {
             slot: self.slot,
             readonly: self.readonly,
             explicit,
             declaration_span: self.declaration_span,
             block_depth: self.block_depth,
+            environment,
         }
     }
 }
@@ -553,8 +565,12 @@ impl FunctionState {
     }
 
     pub(crate) fn lookup_global(&mut self, name: &str, span: KSpan) -> KResult<(BindingTarget, bool)> {
+        if !self.visible_bindings.contains_key("_ENV") {
+            let _ = self.ensure_env_capture();
+        }
+        let environment = self.environment_target()?;
         if let Some(binding) = self.globals.get(name) {
-            return Ok((binding.to_target(true), true));
+            return Ok((binding.to_target(true, environment), true));
         }
 
         match self.global_policy {
@@ -578,10 +594,28 @@ impl FunctionState {
                         explicit: false,
                         declaration_span: None,
                         block_depth: self.block_depth,
+                        environment,
                     },
                     false,
                 ))
             }
+        }
+    }
+
+    fn environment_target(&self) -> KResult<EnvironmentTarget> {
+        let binding = self.visible_bindings.get("_ENV").ok_or_else(|| {
+            KError::bytecode("missing _ENV binding while resolving a global")
+        })?;
+        if matches!(self.kind, FunctionKind::Chunk)
+            && binding.source_depth == 0
+            && binding.declaration_span == self.span
+        {
+            return Ok(EnvironmentTarget::Upvalue { slot: 0 });
+        }
+        if binding.source_depth == 0 {
+            Ok(EnvironmentTarget::Local { slot: binding.slot })
+        } else {
+            Ok(EnvironmentTarget::Upvalue { slot: binding.slot })
         }
     }
 
