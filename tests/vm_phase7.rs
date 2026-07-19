@@ -40,6 +40,24 @@ fn local_environment_redirects_global_accesses() -> Result<(), Box<dyn std::erro
 }
 
 #[test]
+fn debug_upvalueid_preserves_shared_closure_identity() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local x = 1; local a = function() return x end; local b = function() return x end; print(debug.upvalueid(a, 1) == debug.upvalueid(b, 1))".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"true\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn floating_division_by_zero_returns_ieee_values() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
         args: vec![

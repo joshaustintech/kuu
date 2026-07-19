@@ -2452,6 +2452,29 @@ pub fn native_require(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     Ok(vec![vm.require_module_value(&module)?])
 }
 
+pub fn native_debug_upvalueid(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let closure = match vm.arg_or_nil(args, 0) {
+        Value::Closure(handle) => handle,
+        value => return Err(vm.type_error("function expected", value)),
+    };
+    let index = vm.integer_arg(args, 1, "upvalue index expected")?;
+    if index < 1 {
+        return Err(Vm::runtime_error("upvalue index out of range"));
+    }
+    let closure = vm.heap.resolve_closure(closure)?;
+    let handle = closure
+        .upvalues
+        .get(
+            usize::try_from(index - 1)
+                .map_err(|_| Vm::runtime_error("upvalue index out of range"))?,
+        )
+        .copied()
+        .ok_or_else(|| Vm::runtime_error("upvalue index out of range"))?;
+    Ok(vec![Value::integer(i64::try_from(handle.raw()).map_err(
+        |_| Vm::runtime_error("upvalue identity exceeds Lua integer range"),
+    )?)])
+}
+
 stub_native!(
     native_string_gmatch,
     native_utf8_char,
@@ -2469,7 +2492,6 @@ stub_native!(
     native_debug_getinfo,
     native_debug_getupvalue,
     native_debug_setupvalue,
-    native_debug_upvalueid,
     native_debug_upvaluejoin,
     native_debug_getlocal,
     native_debug_setlocal,
