@@ -712,6 +712,26 @@ fn recursive_multi_return_does_not_leak_register_values() -> Result<(), Box<dyn 
 }
 
 #[test]
+fn table_sort_orders_values_with_default_and_custom_comparators()
+-> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local values = {3, 1, 2}; table.sort(values); local words = {'bb', 'a', 'c'}; table.sort(words, function(a, b) return #a < #b end); print(table.concat(values, ','), table.concat(words, ','))"
+                .to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"1,2,3\ta,c,bb\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn table_concat_joins_range_with_separator() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
         args: vec![

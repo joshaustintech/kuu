@@ -1082,6 +1082,64 @@ pub fn native_table_pack(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     Ok(vec![table_value])
 }
 
+pub fn native_table_sort(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let table = vm.table_arg(args, 0, "table expected")?;
+    let comparator = vm.arg_or_nil(args, 1);
+    let length = vm.heap.resolve_table(table)?.array.len();
+    let mut values = Vec::with_capacity(length);
+    for index in 1..=length {
+        let value = vm.heap.resolve_table(table)?.raw_get(Value::integer(
+            i64::try_from(index).map_err(|_| Vm::runtime_error("table index overflow"))?,
+        ))?;
+        if matches!(value, Value::Nil) {
+            return Err(Vm::runtime_error("table.sort encountered a nil value"));
+        }
+        values.push(value);
+    }
+    for index in 1..values.len() {
+        let current = values
+            .get(index)
+            .copied()
+            .ok_or_else(|| Vm::runtime_error("table.sort index overflow"))?;
+        let mut position = index;
+        while position > 0 {
+            let previous = values
+                .get(position - 1)
+                .copied()
+                .ok_or_else(|| Vm::runtime_error("table.sort index overflow"))?;
+            let less = match comparator {
+                Value::Nil => vm
+                    .compare_values(current, previous)?
+                    .map(|ordering| ordering == std::cmp::Ordering::Less)
+                    .ok_or_else(|| Vm::runtime_error("table.sort values are not comparable"))?,
+                Value::Closure(_) | Value::NativeFunction(_) => {
+                    let result = vm.call_value_sync(comparator, vec![current, previous], 0)?;
+                    vm.is_truthy(result)
+                }
+                other => return Err(vm.type_error("function expected", other)),
+            };
+            if !less {
+                break;
+            }
+            *values
+                .get_mut(position)
+                .ok_or_else(|| Vm::runtime_error("table.sort index overflow"))? = previous;
+            position -= 1;
+        }
+        *values
+            .get_mut(position)
+            .ok_or_else(|| Vm::runtime_error("table.sort index overflow"))? = current;
+    }
+    let table = vm.heap.resolve_table_mut(table)?;
+    for (index, value) in values.into_iter().enumerate() {
+        let key = Value::integer(
+            i64::try_from(index + 1).map_err(|_| Vm::runtime_error("table index overflow"))?,
+        );
+        table.raw_set(key, value)?;
+    }
+    Ok(Vec::new())
+}
+
 pub fn native_string_dump(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     let closure = match vm.arg_or_nil(args, 0) {
         Value::Closure(handle) => handle,
@@ -2621,7 +2679,6 @@ stub_native!(
     native_table_insert,
     native_table_remove,
     native_table_move,
-    native_table_sort,
     native_io_lines,
     native_package_loadlib,
     native_debug_traceback,
