@@ -3417,7 +3417,14 @@ impl Vm {
             }
             Value::Closure(handle) => {
                 if site.tail {
-                    self.reuse_frame(site.frame_index, site.call_slot, handle, args)?;
+                    let base = self
+                        .frames
+                        .get(site.frame_index)
+                        .ok_or_else(|| {
+                            KError::new(KErrorKind::Runtime("missing frame".to_owned()), None)
+                        })?
+                        .base;
+                    self.reuse_frame(site.frame_index, base, handle, args)?;
                 } else {
                     self.push_frame(site.frame_index, site.call_slot, handle, args, site.results)?;
                 }

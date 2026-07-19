@@ -654,6 +654,25 @@ fn call_metamethod_chain_allows_fifteen_links_and_rejects_sixteen()
 }
 
 #[test]
+fn fixed_point_closure_can_call_a_returned_closure() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local Z = function(le) local function a(f) return le(function(x) return f(f)(x) end) end return a(a) end; local F = function(f) return function(n) if n == 0 then return 1 else return n * f(n - 1) end end end; local fact = Z(F); print(fact(4))"
+                .to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"24\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn table_concat_joins_range_with_separator() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
         args: vec![
