@@ -3954,9 +3954,7 @@ impl Vm {
     fn value_to_integer(&self, value: Value) -> KResult<Option<i64>> {
         match value {
             Value::Integer(value) => Ok(Some(value)),
-            Value::Number(value) if value.is_finite() && value.fract() == 0.0 => {
-                Ok(Some(value as i64))
-            }
+            Value::Number(value) => Ok(Self::number_to_integer(value)),
             Value::String(handle) => {
                 let bytes = self.heap.string_bytes(handle).ok_or_else(|| {
                     KError::new(
@@ -3991,7 +3989,7 @@ impl Vm {
                 if !number.is_finite() || number.fract() != 0.0 {
                     return Err(());
                 }
-                number as i64
+                Self::number_to_integer(number).ok_or(())?
             } else {
                 let raw = u64::from_str_radix(hex, 16).map_err(|_| ())?;
                 i64::from_ne_bytes(raw.to_ne_bytes())
@@ -4004,7 +4002,7 @@ impl Vm {
                     if !number.is_finite() || number.fract() != 0.0 {
                         return Err(());
                     }
-                    number as i64
+                    Self::number_to_integer(number).ok_or(())?
                 }
             }
         };
@@ -4013,6 +4011,16 @@ impl Vm {
         } else {
             value
         })
+    }
+
+    fn number_to_integer(number: f64) -> Option<i64> {
+        const INTEGER_MIN: f64 = -9_223_372_036_854_775_808.0;
+        const INTEGER_EXCLUSIVE_MAX: f64 = 9_223_372_036_854_775_808.0;
+
+        (number.is_finite()
+            && number.fract() == 0.0
+            && (INTEGER_MIN..INTEGER_EXCLUSIVE_MAX).contains(&number))
+        .then_some(number as i64)
     }
 
     fn parse_hex_number_text(text: &str) -> Option<f64> {

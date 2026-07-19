@@ -131,6 +131,28 @@ fn bitwise_coerces_hex_integer_strings() -> Result<(), Box<dyn std::error::Error
 }
 
 #[test]
+fn bitwise_rejects_out_of_range_numeric_strings() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "print(pcall(function () return '0xffffffffffffffff.0' | 0 end))".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+
+    let expected = ExpectedRun {
+        stdout: b"false\t",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+
+    assert!(actual.stdout.starts_with(expected.stdout));
+    assert_eq!(actual.stderr, expected.stderr);
+    assert_eq!(actual.status.code(), expected.exit_code);
+    Ok(())
+}
+
+#[test]
 fn dash_reads_stdin_and_stops_option_handling() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
         args: vec!["-".to_owned(), "-h".to_owned()],
