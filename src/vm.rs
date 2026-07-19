@@ -2378,6 +2378,8 @@ pub fn native_io_read(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
                     reader.read_to_end(&mut out).map_err(|error| {
                         KError::new(KErrorKind::Runtime(error.to_string()), None)
                     })?;
+                    let handle = vm.heap.intern_string(out)?;
+                    return Ok(vec![Value::string(handle)]);
                 }
                 "l" | "*l" => {
                     let mut byte = [0u8; 1];

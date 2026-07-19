@@ -1,46 +1,104 @@
-# Agent harness
+# Kuu Agent Harness
 
-Reusable task loop for Rust repositories.
+## Trust Contract
 
-## Loop contract
+Kuu is **not complete**. No agent may claim a phase, milestone, roadmap, or
+implementation is complete unless this file contains a current, revision-bound
+receipt for every applicable completion criterion. A passing focused test proves
+only that behavior; it never proves a milestone or project complete.
 
-Each loop must:
+When evidence is missing, stale, contradictory, or a required gate fails, say
+`incomplete` and record the blocker. Never infer completion from implemented
+slices, prior claims, commit messages, a clean diff, or an all-green focused
+test run.
 
-1. Read `AGENTS.md` and the current source.
-2. Pick one smallest unchecked task.
-3. State scope in one sentence.
-4. Edit only files required for that scope.
-5. Run the smallest proof command.
-6. Run `./scripts/after-task.sh`.
-7. Update this file with result and next task.
-8. Stop if proof fails and record the exact blocker.
+## Authority And Provenance Gate
 
-## Checklist
+Before selecting work or reporting status, record:
 
-- [ ] Confirm project-specific build and test commands.
-- [ ] Add or update the smallest failing/targeted test.
-- [ ] Implement one narrow slice.
-- [ ] Run focused proof.
-- [ ] Run the full after-task gate.
-- [ ] Record proof and next task.
+```text
+git status --short --branch
+git rev-parse HEAD
+git ls-files --error-unmatch ROADMAP.md AGENT_HARNESS.md
+```
 
-## Security review rule
+- `ROADMAP.md` defines milestone scope; `AGENT_HARNESS.md` defines proof.
+- If either tracked authority file is absent, branch is behind its intended
+  source, or checkout provenance is unclear, stop milestone accounting and
+  report `status unverified` with exact command output.
+- Never alter, overwrite, or silently work around unrelated dirty files.
 
-Security leads are unproven until they identify exact code, attacker-controlled input, reachable preconditions, impact, and a reproducible proof or test. A heuristic or regex hit alone is not a finding. Review the classes in `scripts/security-watchlist.md` when a lead appears.
+## Completion States
 
-## Progress log
+Use exactly one state per item:
 
-- 2026-07-12: Added zero-dependency `rust-harness` binary with `#![forbid(unsafe_code)]`. Proof: `cargo run`, `cargo fmt --all -- --check`, `cargo clippy --all-targets -- -D warnings`, and `cargo test` passed.
-- 2026-07-12: Vendored harness workflow, Lua 5.5 manual, all 34 Lua smoke scripts, and `libs/`/`ltests/` fixtures. Rebased parser, lexer, and inventory tests on repo-local paths. Added ignored Rust conformance gate and `scripts/run-upstream-smoke.sh`. Proof: targeted smoke reports 34 expected failures; Rust format, test, Clippy, and security review pass. Next: fix one supported Lua smoke failure per loop iteration.
-- 2026-07-12: Added Lua hexadecimal integer/float literal lowering with compiler regressions. Proof: focused compiler tests, full Rust checks, and smoke improved to 6 pass / 28 fail; `code.lua` and `heavy.lua` now pass. Next: fix one supported runtime failure.
-- 2026-07-12: Accepted leading-dot hexadecimal floats and registered `math.ldexp`; direct `math.ldexp(1, 2)` proof passes. `math.lua` now gets past numeric compilation but still stops on a later non-callable runtime value. Corpus remains 6 pass / 28 fail. Next: isolate that runtime call.
-- 2026-07-12: Bound global `require` to the existing loader and added a CLI regression proving `require('math').abs(-2)`. Focused proof passes. Corpus remains blocked by later `math.lua` non-callable runtime behavior and missing `coroutine` module; long smoke scripts need a portable timeout before broad execution.
-- 2026-07-12: Implemented `string.packsize('j')` as 8 bytes and added CLI coverage. `bitwise.lua` advances past packsize, then reaches separate string bitwise coercion failure. Next: implement one coercion path without regressing numeric operators.
-- 2026-07-12: Added signed hexadecimal integer-string coercion for bitwise operators with CLI coverage. First coercion case passes; `bitwise.lua` advances to a later string/string `band` case. Next: extend coercion only where Lua numeric strings require it.
-- 2026-07-12: Extended bitwise string coercion to integral decimal/hex floats; focused CLI cases all pass. `bitwise.lua` now advances to `load` environment handling. Next: fix one narrow `load` default-environment path.
-- 2026-07-12: Made `load` and `loadfile` treat nil environment as global environment; added CLI regression. `bitwise.lua` advances beyond load and now reaches integer overflow. Next: isolate Lua integer overflow semantics.
-- 2026-07-12: Corrected integer `+`, `-`, and `*` overflow to Lua wrapping semantics; added CLI regression. `bitwise.lua` advances through core overflow assertions and now exposes `bit32.band()` vararg behavior. Next: isolate that function-call path.
-- 2026-07-19: Fixed omitted-parameter frame initialization: missing parameters now clear the same slots used by supplied arguments. Added CLI regression; `bitwise.lua` advances past the prior `bit32.band()` function-value crash to a later assertion. Next: isolate that assertion.
-- 2026-07-19: Rejected out-of-range integral floats during bitwise coercion, including hexadecimal numeric strings. Added CLI regression; vendored `bitwise.lua` now reaches `OK`. Next: select a different failing smoke script.
-- 2026-07-19: Advanced `calls.lua` through method declarations, tail method calls, dotted method targets, required `type` arguments, and shadowed closure upvalues. Focused regressions plus Rust gate pass; next: isolate tail-call assertion.
-- 2026-07-19: Advanced `math.lua` through whitespace numeric coercion, IEEE division and floor division, integer negation/floor precision, exact integer-float ordering, and NaN ordering. Focused regressions plus Rust gate pass; next: isolate compile-time bitwise diagnostic assertion.
+- `not started`: no implementation receipt.
+- `in progress`: scoped work exists; exit criteria not proven.
+- `blocked`: exact failing command/fixture or missing authority recorded.
+- `unsupported`: C-ABI or dynamic-loading feature only; exact test, feature,
+  and safe-Rust reason recorded.
+- `complete`: every listed exit criterion has a current receipt.
+
+`complete` is forbidden while any supported upstream fixture fails, the
+conformance report is absent/stale, or any required QA gate fails.
+
+## Required Receipt
+
+Every status update records date, `HEAD`, command, exit code, and concise
+result. For implementation slices also record failing-first regression test,
+files changed, and next remaining item. Do not call a command "passed" unless
+this loop ran it successfully at recorded `HEAD`.
+
+Required project-completion commands:
+
+```text
+cargo fmt --check
+cargo test
+cargo clippy --all-targets -- -D warnings
+rg "unsafe|unwrap\\(|expect\\(|panic!|todo!|unimplemented!|unreachable!" src tests
+./scripts/run-upstream-smoke.sh
+```
+
+The upstream receipt must deterministically classify every local script as
+`pass`, `fail`, or `unsupported`, identify each supported failure, and retain
+the report path. `api.lua`/C dynamic loading may be unsupported only with an
+exact reason; no other script becomes unsupported by convenience.
+
+## Remaining Work Ledger
+
+This ledger is deliberately fail-closed. Update it after evidence, never by
+guessing.
+
+| Item | State | Evidence / next proof |
+| --- | --- | --- |
+| Authority files and branch provenance | blocked | 2026-07-19, `b01ed96`: local `main` is 47 commits behind `origin/main`; `git push` was rejected as non-fast-forward. Local tracked `ROADMAP.md` remains absent. Safe integration of `origin/main` needs approval because local user changes are present. |
+| Milestones 1-6 | in progress | Origin roadmap says full corpus is expected to fail. Do not mark any complete until its fixture and conformance receipts exist. |
+| Phase 12 full conformance | in progress | 2026-07-19, `731ba960a10b1df64a1248349af797575301af6b` plus uncommitted `src/vm.rs` and `tests/phase11_cli.rs`: minimized `load(..., nil)` and empty `file:read("*a")` regressions failed first; both now pass. Manual `/Users/josh/lua-5.5.0-tests/all.lua` advances past its empty-input check and next fails in `main.lua` with `runtime error: string expected`. Next: isolate that supported failure. Local checkout still lacks `scripts/run-upstream-smoke.sh`. |
+| GC/finalizers | blocked | Lua-level table `__gc` finalizer remains unproven/failing. Add failing-first regression, then prove finalizer and `__close` order/error behavior. |
+| IO library | blocked | `file:seek()` and `io.lines()` remain failing/unimplemented. Add fixture-level regressions and run affected upstream scripts. |
+| QA gate | blocked | 2026-07-19, `731ba960a10b1df64a1248349af797575301af6b` plus uncommitted `src/parser.rs`, `src/vm.rs`, and `tests/phase11_cli.rs`: `cargo fmt --check`, `cargo test`, and `cargo clippy --all-targets -- -D warnings` exit 0. Forbidden-pattern scan reports only crate-root `#![forbid(unsafe_code)]`. Upstream runner receipt still absent because this checkout lacks `scripts/run-upstream-smoke.sh`. |
+| Tooling phases 13-16 | not started | `kuulsp`, MCP server, `kuufmt`, and `kuulint` have no current implementation or integration receipts. |
+
+## Loop Procedure
+
+1. Run authority/provenance gate. If it fails, update ledger only; do not make
+   completion claims.
+2. Read `ROADMAP.md`, this ledger, relevant phase doc, and current failing
+   fixture.
+3. Choose one supported blocked item. Write a minimized test that fails first.
+4. Implement smallest safe slice; run focused proof.
+5. Run all required receipt commands. A failing gate keeps the item `blocked`.
+6. Update this ledger with only observed facts, including remaining failures.
+7. Before any `complete` claim, independently re-read roadmap, ledger, test
+   report, git status, and receipts. If one is missing, say `incomplete`.
+
+## Prior False-Completion Diagnosis
+
+The prior loop could stop after a local slice because its old checklist asked
+for a "smallest unchecked task" and "next task" but had no authoritative
+milestone matrix, no branch/provenance check, no mandatory full-conformance
+receipt, and no rule making a failed QA gate veto completion. Its
+`after-task.sh` gate ran formatting, Clippy, Rust tests, and security review,
+but not the upstream smoke runner. This was process failure, not evidence of
+completion. This harness corrects it by making completion evidence-bound and
+fail-closed.
