@@ -206,6 +206,7 @@ pub(crate) struct BlockFrame {
     pub(crate) previous_global_default: bool,
     pub(crate) local_undos: Vec<(String, Option<Binding>)>,
     pub(crate) global_undos: Vec<(String, Option<GlobalBinding>)>,
+    pub(crate) shadowed_globals: BTreeSet<String>,
     pub(crate) label_undos: Vec<(String, Option<LabelRecord>)>,
     pub(crate) decl_ids: Vec<usize>,
     pub(crate) scope_id: usize,
@@ -321,6 +322,7 @@ impl FunctionState {
             previous_global_default: self.has_global_default,
             local_undos: Vec::new(),
             global_undos: Vec::new(),
+            shadowed_globals: BTreeSet::new(),
             label_undos: Vec::new(),
             decl_ids: Vec::new(),
             scope_id,
@@ -409,6 +411,11 @@ impl FunctionState {
             block_depth: self.block_depth,
             source_depth: 0,
         };
+        if let Some(frame) = self.block_frames.last_mut()
+            && frame.global_undos.iter().any(|(declared, _)| declared == &name)
+        {
+            frame.shadowed_globals.insert(name.clone());
+        }
         let previous = self.visible_bindings.insert(name.clone(), binding.clone());
         self.active_decls.insert(decl_id);
         self.declarations.push(DeclarationRecord {
@@ -575,7 +582,10 @@ impl FunctionState {
     pub(crate) fn global_declared_in_current_block(&self, name: &str) -> bool {
         self.block_frames
             .last()
-            .is_some_and(|frame| frame.global_undos.iter().any(|(declared, _)| declared == name))
+            .is_some_and(|frame| {
+                frame.global_undos.iter().any(|(declared, _)| declared == name)
+                    && !frame.shadowed_globals.contains(name)
+            })
     }
 
     pub(crate) fn lookup_outer_capture(&self, name: &str) -> Option<(Binding, usize)> {
