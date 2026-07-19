@@ -58,6 +58,24 @@ fn debug_upvalueid_preserves_shared_closure_identity() -> Result<(), Box<dyn std
 }
 
 #[test]
+fn goto_uses_the_label_in_its_lexical_block() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local x = 13; do goto done; local a = 23; ::done:: end; do goto done; local b = 45; ::done:: end; print(x)".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"13\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn floating_division_by_zero_returns_ieee_values() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
         args: vec![

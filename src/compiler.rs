@@ -1665,24 +1665,59 @@ impl<'a> FunctionCompiler<'a> {
     fn patch_gotos(&mut self) -> KResult<()> {
         let patches = self.goto_patches.clone();
         for (index, name, goto_span) in patches {
+            let goto_active_decls = self
+                .resolved
+                .gotos
+                .iter()
+                .find(|record| record.name == name && record.span == goto_span)
+                .map(|record| &record.active_decls);
             let labels = self
                 .labels
                 .get(&name)
                 .ok_or_else(|| KError::bytecode(format!("unresolved label '{name}'")))?;
-            let target = labels
+            let target = self
+                .resolved
+                .labels
                 .iter()
-                .filter(|(span, _)| {
-                    span.start_line < goto_span.start_line
-                        || (span.start_line == goto_span.start_line
-                            && span.start_column <= goto_span.start_column)
+                .filter(|label| label.name == name)
+                .filter(|label| {
+                    goto_active_decls.is_some_and(|active| label.active_decls == *active)
                 })
-                .max_by_key(|(span, _)| (span.start_line, span.start_column))
+                .filter_map(|label| {
+                    labels
+                        .iter()
+                        .find(|(span, _)| *span == label.span)
+                        .map(|(_, target)| (label.span, *target))
+                })
+                .min_by_key(|(span, _)| {
+                    let future = span.start_line > goto_span.start_line
+                        || (span.start_line == goto_span.start_line
+                            && span.start_column > goto_span.start_column);
+                    (!future, span.start_line, span.start_column)
+                })
+                .map(|(_, target)| target)
                 .or_else(|| {
                     labels
                         .iter()
+                        .filter(|(span, _)| {
+                            span.start_line > goto_span.start_line
+                                || (span.start_line == goto_span.start_line
+                                    && span.start_column > goto_span.start_column)
+                        })
                         .min_by_key(|(span, _)| (span.start_line, span.start_column))
+                        .map(|(_, target)| *target)
                 })
-                .map(|(_, target)| *target)
+                .or_else(|| {
+                    labels
+                        .iter()
+                        .filter(|(span, _)| {
+                            span.start_line < goto_span.start_line
+                                || (span.start_line == goto_span.start_line
+                                    && span.start_column <= goto_span.start_column)
+                        })
+                        .max_by_key(|(span, _)| (span.start_line, span.start_column))
+                        .map(|(_, target)| *target)
+                })
                 .ok_or_else(|| KError::bytecode(format!("unresolved label '{name}'")))?;
             self.patch_jump(index, target)?;
         }
