@@ -5576,7 +5576,8 @@ impl Vm {
         mode: Option<&str>,
         env: Option<Value>,
     ) -> KResult<ClosureHandle> {
-        let lua_binary = bytes.starts_with(b"\x1bLua");
+        let lua_binary =
+            bytes.first() == Some(&0x1b) && (bytes.len() < 40 || bytes.starts_with(b"\x1bLua"));
         let is_binary = lua_binary || bytes.starts_with(b"KUUBIN\0");
         let bytes = if !is_binary && bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
             bytes.get(3..).unwrap_or(&[])
@@ -5601,6 +5602,23 @@ impl Vm {
 
         let proto = if is_binary {
             let header_len = if lua_binary { 40 } else { 7 };
+            if lua_binary {
+                if bytes.len() < header_len {
+                    return Err(Vm::runtime_error("truncated binary chunk"));
+                }
+                let mut expected = b"\x1bLua\x55\0\x19\x93\r\n\x1a\n".to_vec();
+                expected.push(4);
+                expected.extend((-0x5678_i32).to_ne_bytes());
+                expected.push(4);
+                expected.extend(0x12345678_u32.to_ne_bytes());
+                expected.push(8);
+                expected.extend((-0x5678_i64).to_ne_bytes());
+                expected.push(8);
+                expected.extend((-370.5_f64).to_ne_bytes());
+                if bytes.get(..header_len) != Some(expected.as_slice()) {
+                    return Err(Vm::runtime_error("corrupted binary chunk"));
+                }
+            }
             Proto::decode(bytes.get(header_len..).ok_or_else(|| {
                 KError::new(
                     KErrorKind::Runtime("binary chunk header truncated".to_owned()),

@@ -897,6 +897,24 @@ fn string_pack_supports_binary_header_formats() -> Result<(), Box<dyn std::error
 }
 
 #[test]
+fn truncated_lua_binary_headers_report_truncation() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local c = string.dump(function() end); local f, message = load(string.sub(c, 1, 1)); print(f == nil, string.find(message, 'truncated') ~= nil)".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"true\ttrue\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn collectgarbage_terminates_on_unreachable_closure_cycles()
 -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
