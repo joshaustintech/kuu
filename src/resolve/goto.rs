@@ -14,14 +14,16 @@ struct LocalLabel {
 #[derive(Debug)]
 struct BlockFrame<'a> {
     block: &'a Block,
-    inherited_labels: BTreeMap<String, KSpan>,
+    known_labels: BTreeMap<String, KSpan>,
+    visible_labels: BTreeMap<String, KSpan>,
 }
 
 impl Resolver {
     pub fn resolve_chunk(chunk: &crate::ast::Chunk) -> KResult<()> {
         let mut stack = vec![BlockFrame {
             block: &chunk.block,
-            inherited_labels: BTreeMap::new(),
+            known_labels: BTreeMap::new(),
+            visible_labels: BTreeMap::new(),
         }];
 
         while let Some(frame) = stack.pop() {
@@ -39,7 +41,7 @@ impl Resolver {
             if let Some((name, span)) = Self::label_from_stmt(stmt) {
                 match local_labels.entry(name.clone()) {
                     std::collections::btree_map::Entry::Vacant(entry) => {
-                        if frame.inherited_labels.contains_key(&name) {
+                        if frame.visible_labels.contains_key(&name) {
                             return Err(Self::duplicate_label_error(name, span));
                         }
                         entry.insert(LocalLabel { span, stmt_index });
@@ -55,9 +57,9 @@ impl Resolver {
             }
         }
 
-        let mut visible_labels = frame.inherited_labels.clone();
+        let mut known_labels = frame.known_labels.clone();
         for (name, label) in &local_labels {
-            visible_labels.insert(name.clone(), label.span);
+            known_labels.insert(name.clone(), label.span);
         }
 
         let mut children = Vec::<BlockFrame<'a>>::new();
@@ -69,18 +71,24 @@ impl Resolver {
                     name,
                     stmt_index,
                     &local_labels,
-                    &frame.inherited_labels,
+                    &frame.known_labels,
                     &declaration_indices,
                     frame.block,
                 )?;
             }
 
-            Self::collect_stmt_children(stmt, &visible_labels, &mut children)?;
+            let mut visible_labels = frame.visible_labels.clone();
+            for (name, label) in &local_labels {
+                if label.stmt_index < stmt_index {
+                    visible_labels.insert(name.clone(), label.span);
+                }
+            }
+            Self::collect_stmt_children(stmt, &known_labels, &visible_labels, &mut children)?;
         }
 
         if let Some(return_stmt) = &frame.block.return_stmt {
             for value in &return_stmt.values {
-                Self::collect_expr_children(value, &visible_labels, &mut children)?;
+                Self::collect_expr_children(value, &known_labels, &mut children)?;
             }
         }
 
@@ -96,7 +104,7 @@ impl Resolver {
         name: &str,
         goto_index: usize,
         local_labels: &BTreeMap<String, LocalLabel>,
-        inherited_labels: &BTreeMap<String, KSpan>,
+        known_labels: &BTreeMap<String, KSpan>,
         declaration_indices: &[usize],
         block: &Block,
     ) -> KResult<()> {
@@ -120,7 +128,7 @@ impl Resolver {
             return Ok(());
         }
 
-        if inherited_labels.contains_key(name) {
+        if known_labels.contains_key(name) {
             return Ok(());
         }
 
@@ -193,6 +201,7 @@ impl Resolver {
 
     fn collect_stmt_children<'a>(
         stmt: &'a Stmt,
+        known_labels: &BTreeMap<String, KSpan>,
         visible_labels: &BTreeMap<String, KSpan>,
         children: &mut Vec<BlockFrame<'a>>,
     ) -> KResult<()> {
@@ -204,7 +213,8 @@ impl Resolver {
             | Stmt::GenericFor { block, .. } => {
                 children.push(BlockFrame {
                     block,
-                    inherited_labels: visible_labels.clone(),
+                    known_labels: known_labels.clone(),
+                    visible_labels: visible_labels.clone(),
                 });
             }
             Stmt::If {
@@ -215,13 +225,15 @@ impl Resolver {
                 if let Some(block) = else_block {
                     children.push(BlockFrame {
                         block,
-                        inherited_labels: visible_labels.clone(),
+                        known_labels: known_labels.clone(),
+                        visible_labels: visible_labels.clone(),
                     });
                 }
                 for (_, block) in branches.iter().rev() {
                     children.push(BlockFrame {
                         block,
-                        inherited_labels: visible_labels.clone(),
+                        known_labels: known_labels.clone(),
+                        visible_labels: visible_labels.clone(),
                     });
                 }
             }
@@ -338,7 +350,8 @@ impl Resolver {
     fn push_function_body<'a>(body: &'a FunctionBody, children: &mut Vec<BlockFrame<'a>>) {
         children.push(BlockFrame {
             block: &body.block,
-            inherited_labels: BTreeMap::new(),
+            known_labels: BTreeMap::new(),
+            visible_labels: BTreeMap::new(),
         });
     }
 }

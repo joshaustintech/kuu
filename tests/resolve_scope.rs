@@ -211,3 +211,17 @@ fn forward_goto_to_terminal_label_may_skip_local() -> Result<(), String> {
     resolve("do goto done; local value = 23; ::done::; end")?;
     Ok(())
 }
+
+#[test]
+fn nested_label_may_shadow_later_outer_label() -> Result<(), String> {
+    resolve(
+        "local function f(a)\n\
+         if a == 4 then\n\
+           goto l1\n\
+           ::l1:: return 5\n\
+         end\n\
+         ::l1:: return 1\n\
+         end",
+    )?;
+    Ok(())
+}
