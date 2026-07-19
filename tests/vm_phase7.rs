@@ -732,6 +732,25 @@ fn table_sort_orders_values_with_default_and_custom_comparators()
 }
 
 #[test]
+fn load_accepts_a_chunk_reader_function() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local chunks = {'return ', '20 + ', '22'}; local index = 0; local chunk = load(function() index = index + 1; return chunks[index] or '' end); print(chunk())"
+                .to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"42\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn table_concat_joins_range_with_separator() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
         args: vec![

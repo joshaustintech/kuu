@@ -883,9 +883,29 @@ pub fn native_xpcall(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
 pub fn native_load(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     let source = match vm.arg_or_nil(args, 0) {
         Value::String(handle) => vm.string_bytes_from_handle(handle)?,
+        reader @ (Value::Closure(_) | Value::NativeFunction(_)) => {
+            let mut bytes = Vec::new();
+            loop {
+                let chunk = vm.call_value_sync(reader, Vec::new(), 0)?;
+                match chunk {
+                    Value::Nil => break,
+                    Value::String(handle) => {
+                        let chunk = vm.string_bytes_from_handle(handle)?;
+                        if chunk.is_empty() {
+                            break;
+                        }
+                        bytes.extend(chunk);
+                    }
+                    other => {
+                        return Err(vm.type_error("reader function must return a string", other));
+                    }
+                }
+            }
+            bytes
+        }
         _ => {
             return Err(Vm::runtime_error(
-                "load currently supports string chunks only".to_owned(),
+                "load expects a string or reader function",
             ));
         }
     };
@@ -1397,7 +1417,9 @@ pub fn native_string_sub(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
         )
     })?;
     let start = match vm.arg_or_nil(args, 1) {
-        Value::Integer(value) => normalize_lua_index(value, len, 1),
+        Value::Integer(value) if value < 0 => (len + value + 1).max(1),
+        Value::Integer(0) => 1,
+        Value::Integer(value) => value,
         _ => 1,
     };
     let end = match vm.arg_or_nil(args, 2) {

@@ -21,11 +21,21 @@ trap stop_active_run HUP INT TERM
 
 run_with_timeout() {
   perl -e '
+    use POSIX qw(WNOHANG);
     $seconds = shift;
     $pid = fork;
     die "fork failed\n" unless defined $pid;
     if ($pid == 0) { exec @ARGV; die "exec failed\n"; }
-    sub stop_child { kill "TERM", $pid; waitpid $pid, 0; }
+    sub stop_child {
+      kill "TERM", $pid;
+      for (1..20) {
+        my $result = waitpid $pid, WNOHANG;
+        return if $result == $pid;
+        select undef, undef, undef, 0.05;
+      }
+      kill "KILL", $pid;
+      waitpid $pid, 0;
+    }
     $SIG{ALRM} = sub { stop_child(); exit 124; };
     $SIG{HUP} = sub { stop_child(); exit 129; };
     $SIG{INT} = sub { stop_child(); exit 130; };
