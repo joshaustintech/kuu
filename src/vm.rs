@@ -1757,10 +1757,7 @@ pub fn native_math_log(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
 pub fn native_math_fmod(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     let left = vm.arg_or_nil(args, 0);
     let right = vm.arg_or_nil(args, 1);
-    if let (Some(left), Some(right)) = (
-        math_integer_value(vm, left)?,
-        math_integer_value(vm, right)?,
-    ) {
+    if let (Value::Integer(left), Value::Integer(right)) = (left, right) {
         let divisor = right;
         if divisor == 0 {
             return Err(KError::new(KErrorKind::Runtime("zero".to_owned()), None));

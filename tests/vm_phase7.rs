@@ -243,6 +243,24 @@ fn numeric_for_uses_each_loop_binding() -> Result<(), Box<dyn std::error::Error>
 }
 
 #[test]
+fn math_fmod_preserves_float_result_for_float_input() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "print(math.type(math.fmod(-6, -6)), math.type(math.fmod(-6.0, -6)))".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"integer\tfloat\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn literal_integer_floor_division_by_zero_errors_when_called()
 -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
