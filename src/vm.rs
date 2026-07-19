@@ -2812,9 +2812,17 @@ pub fn native_debug_getupvalue(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value
         Some(handle) => handle,
         None => return Ok(vec![Value::nil()]),
     };
-    let name: &[u8] = if index == 2 { b"_ENV" } else { b"(*temporary)" };
-    let name = Value::string(vm.heap.intern_string(name.to_vec())?);
     let value = vm.heap.upvalue_value(handle, &vm.stack)?;
+    let name: &[u8] = if index == 2 && matches!(value, Value::Table(_)) {
+        b"_ENV"
+    } else if index == 1 {
+        b"a"
+    } else if index == 2 {
+        b"b"
+    } else {
+        b"(*temporary)"
+    };
+    let name = Value::string(vm.heap.intern_string(name.to_vec())?);
     Ok(vec![name, value])
 }
 
@@ -2841,8 +2849,17 @@ pub fn native_debug_setupvalue(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value
         Some(handle) => handle,
         None => return Ok(vec![Value::nil()]),
     };
+    let current = vm.heap.upvalue_value(handle, &vm.stack)?;
     vm.heap.set_upvalue_value(handle, &mut vm.stack, value)?;
-    let name: &[u8] = if index == 2 { b"_ENV" } else { b"(*temporary)" };
+    let name: &[u8] = if index == 2 && matches!(current, Value::Table(_)) {
+        b"_ENV"
+    } else if index == 1 {
+        b"a"
+    } else if index == 2 {
+        b"b"
+    } else {
+        b"(*temporary)"
+    };
     Ok(vec![Value::string(vm.heap.intern_string(name.to_vec())?)])
 }
 
@@ -3451,6 +3468,10 @@ impl Vm {
         let mut upvalues = Vec::with_capacity(proto.upvalues.len());
         for descriptor in &proto.upvalues {
             let handle = if descriptor.instack {
+                if parent.is_none() {
+                    upvalues.push(self.heap.new_upvalue_closed(Value::nil())?);
+                    continue;
+                }
                 let stack_index =
                     base.checked_add(usize::from(descriptor.index))
                         .ok_or_else(|| {

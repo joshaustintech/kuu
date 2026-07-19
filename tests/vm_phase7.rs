@@ -816,7 +816,7 @@ fn debug_upvalue_access_and_mutation_work() -> Result<(), Box<dyn std::error::Er
         ..RunOptions::default()
     })?;
     let expected = ExpectedRun {
-        stdout: b"true\t(*temporary)\t2\n",
+        stdout: b"true\ta\t2\n",
         stderr: b"",
         exit_code: Some(0),
     };
@@ -835,6 +835,24 @@ fn loaded_chunks_receive_varargs() -> Result<(), Box<dyn std::error::Error>> {
     })?;
     let expected = ExpectedRun {
         stdout: b"4\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
+fn binary_loaded_closures_start_with_nil_upvalues() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local a = 20; local f = function() return a end; local g = assert(load(string.dump(f), '', 'b')); print(g() == nil, debug.setupvalue(g, 1, 'hi'), g())".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"true\ta\thi\n",
         stderr: b"",
         exit_code: Some(0),
     };
