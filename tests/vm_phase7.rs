@@ -366,6 +366,24 @@ fn numeric_for_uses_each_loop_binding() -> Result<(), Box<dyn std::error::Error>
 }
 
 #[test]
+fn loop_closures_keep_each_iteration_locals() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local a = {}; for i = 1, 3 do local y = 0; a[i] = function () y = y + 10; return i, y end end; local i, y = a[1](); print(i, y); i, y = a[2](); print(i, y); i, y = a[3](); print(i, y)".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"1\t10\n2\t10\n3\t10\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn math_fmod_preserves_float_result_for_float_input() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
         args: vec![

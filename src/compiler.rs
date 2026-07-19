@@ -61,6 +61,7 @@ struct BlockFrame {
 #[derive(Debug, Clone)]
 struct LoopFrame {
     break_sites: Vec<usize>,
+    close_from: Option<u16>,
 }
 
 #[derive(Debug, Clone)]
@@ -394,10 +395,19 @@ impl<'a> FunctionCompiler<'a> {
 
     fn compile_break(&mut self) -> KResult<()> {
         self.emit_close_for_active_scopes()?;
-        let jump = self.emit_jump_placeholder();
-        let Some(loop_frame) = self.loop_stack.last_mut() else {
+        let Some(close_from) = self.loop_stack.last().map(|frame| frame.close_from) else {
             return Err(KError::syntax("break outside loop", self.span));
         };
+        if let Some(slot) = close_from {
+            self.instructions.push(Instruction::Close {
+                from: Register::new(slot),
+            });
+        }
+        let jump = self.emit_jump_placeholder();
+        let loop_frame = self
+            .loop_stack
+            .last_mut()
+            .ok_or_else(|| KError::syntax("break outside loop", self.span))?;
         loop_frame.break_sites.push(jump);
         Ok(())
     }
@@ -503,6 +513,7 @@ impl<'a> FunctionCompiler<'a> {
         let exit_jump = self.emit_conditional_jump(false, cond_reg);
         self.loop_stack.push(LoopFrame {
             break_sites: Vec::new(),
+            close_from: None,
         });
         self.compile_block(block, false)?;
         self.emit_jump(loop_start)?;
@@ -517,6 +528,7 @@ impl<'a> FunctionCompiler<'a> {
         let loop_start = self.instructions.len();
         self.loop_stack.push(LoopFrame {
             break_sites: Vec::new(),
+            close_from: None,
         });
         self.compile_block(block, false)?;
         let cond_reg = self.compile_expr_result(condition)?;
@@ -548,6 +560,7 @@ impl<'a> FunctionCompiler<'a> {
         self.emit_move(loop_reg, start_reg)?;
         self.loop_stack.push(LoopFrame {
             break_sites: Vec::new(),
+            close_from: Some(loop_slot),
         });
         let loop_start = self.instructions.len();
         let zero_reg = self.load_integer_temp(0)?;
@@ -584,6 +597,8 @@ impl<'a> FunctionCompiler<'a> {
         let body_start = self.instructions.len();
         self.patch_jump(skip_negative, body_start)?;
         self.compile_block(block, false)?;
+        self.instructions
+            .push(Instruction::Close { from: loop_reg });
 
         let next_value = self.alloc_temp()?;
         self.instructions.push(Instruction::Arithmetic {
@@ -630,6 +645,7 @@ impl<'a> FunctionCompiler<'a> {
         });
         self.loop_stack.push(LoopFrame {
             break_sites: Vec::new(),
+            close_from: Some(loop_slot),
         });
         let call_base = self.alloc_temp()?;
         let call_slots = usize::max(3, names.len());
@@ -683,6 +699,9 @@ impl<'a> FunctionCompiler<'a> {
         }
 
         self.compile_block(block, false)?;
+        self.instructions.push(Instruction::Close {
+            from: Register::new(loop_slot),
+        });
         self.emit_move(control_reg, call_base)?;
         self.emit_jump(loop_start)?;
 
