@@ -316,6 +316,25 @@ fn gsub_trims_decimal_padding_with_nongreedy_capture() -> Result<(), Box<dyn std
 }
 
 #[test]
+fn string_pack_and_unpack_native_float() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local value, next = string.unpack('n', string.pack('n', 1.5)); print(value, next, string.packsize('n'))"
+                .to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"1.5\t9\t8\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn literal_integer_floor_division_by_zero_errors_when_called()
 -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {

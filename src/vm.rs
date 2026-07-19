@@ -1271,10 +1271,51 @@ pub fn native_string_rep(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
 
 pub fn native_string_packsize(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     let format = vm.string_text_arg(args, 0)?;
-    if format == "j" {
+    if format == "j" || format == "n" {
         return Ok(vec![Value::integer(8)]);
     }
     Err(Vm::runtime_error("unsupported pack format"))
+}
+
+pub fn native_string_pack(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let format = vm.string_text_arg(args, 0)?;
+    let bytes = match format.as_str() {
+        "j" => vm
+            .integer_arg(args, 1, "integer expected")?
+            .to_ne_bytes()
+            .to_vec(),
+        "n" => vm
+            .number_arg(args, 1, "number expected")?
+            .to_ne_bytes()
+            .to_vec(),
+        _ => return Err(Vm::runtime_error("unsupported pack format")),
+    };
+    let handle = vm.heap.intern_string(bytes)?;
+    Ok(vec![Value::string(handle)])
+}
+
+pub fn native_string_unpack(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let format = vm.string_text_arg(args, 0)?;
+    let bytes = vm.string_bytes_arg_typed(args, 1, "string expected")?;
+    let start = match vm.arg_or_nil(args, 2) {
+        Value::Nil => 1,
+        Value::Integer(value) if value >= 1 => value,
+        _ => return Err(Vm::runtime_error("integer expected")),
+    };
+    let start = usize::try_from(start.saturating_sub(1)).unwrap_or(usize::MAX);
+    let slice = bytes
+        .get(start..start.saturating_add(8))
+        .ok_or_else(|| Vm::runtime_error("data string too short"))?;
+    let array: [u8; 8] = slice
+        .try_into()
+        .map_err(|_| Vm::runtime_error("data string too short"))?;
+    let value = match format.as_str() {
+        "j" => Value::integer(i64::from_ne_bytes(array)),
+        "n" => Value::number(f64::from_ne_bytes(array)),
+        _ => return Err(Vm::runtime_error("unsupported pack format")),
+    };
+    let next = i64::try_from(start.saturating_add(9)).unwrap_or(i64::MAX);
+    Ok(vec![value, Value::integer(next)])
 }
 
 pub fn native_string_lower(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
@@ -2340,8 +2381,6 @@ pub fn native_require(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
 
 stub_native!(
     native_string_gmatch,
-    native_string_pack,
-    native_string_unpack,
     native_utf8_char,
     native_utf8_codes,
     native_utf8_codepoint,
