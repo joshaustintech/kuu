@@ -555,6 +555,46 @@ fn require_returns_coroutine_module_table() -> Result<(), Box<dyn std::error::Er
 }
 
 #[test]
+fn coroutine_wrap_returns_a_function_that_runs_a_call_chain()
+-> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local n = 10; local function f() if n == 0 then return 1023 end n = n - 1; return f() end; for _ = 1, 15 do f = setmetatable({}, {__call = f}) end; local wrapped = coroutine.wrap(function() return f() end); print(type(wrapped), wrapped())"
+                .to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"function\t1023\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
+fn coroutine_create_resume_returns_values_and_marks_dead() -> Result<(), Box<dyn std::error::Error>>
+{
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local co = coroutine.create(function(a, b) return a + b, a * b end); local ok, sum, product = coroutine.resume(co, 2, 3); local retry, message = coroutine.resume(co); print(type(co), ok, sum, product, coroutine.status(co), retry, type(message))"
+                .to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"thread\ttrue\t5\t6\tdead\tfalse\tstring\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn table_concat_joins_range_with_separator() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
         args: vec![

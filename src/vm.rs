@@ -66,9 +66,18 @@ struct ExecutionState {
 }
 
 #[allow(dead_code)]
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 struct ThreadState {
+    entry: Value,
+    status: ThreadStatus,
     execution: ExecutionState,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ThreadStatus {
+    Suspended,
+    Running,
+    Dead,
 }
 
 #[derive(Debug, Clone)]
@@ -560,6 +569,28 @@ impl Heap {
 pub fn native_print(_vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     _vm.print_values(args)?;
     Ok(Vec::new())
+}
+
+pub fn native_coroutine_create(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let entry = vm.arg_or_nil(args, 0);
+    Ok(vec![vm.coroutine_create(entry)?])
+}
+
+pub fn native_coroutine_resume(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    vm.coroutine_resume(args)
+}
+
+pub fn native_coroutine_wrap(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let entry = vm.arg_or_nil(args, 0);
+    Ok(vec![vm.coroutine_wrap(entry)?])
+}
+
+pub fn native_coroutine_wrap_resume(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    vm.coroutine_wrap_resume(args)
+}
+
+pub fn native_coroutine_status(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    Ok(vec![vm.coroutine_status(vm.arg_or_nil(args, 0))?])
 }
 
 pub fn native_collectgarbage(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
@@ -2749,6 +2780,115 @@ impl Vm {
                     None,
                 )
             })
+    }
+
+    fn coroutine_create(&mut self, entry: Value) -> KResult<Value> {
+        self.callable_with_args(entry, Vec::new())?;
+        let raw = u64::try_from(self.threads.len()).map_err(|_| {
+            KError::new(
+                KErrorKind::Runtime("thread handle overflow".to_owned()),
+                None,
+            )
+        })?;
+        self.threads.push(Some(ThreadState {
+            entry,
+            status: ThreadStatus::Suspended,
+            execution: ExecutionState::default(),
+        }));
+        Ok(Value::thread(ThreadHandle::new(raw)))
+    }
+
+    fn coroutine_resume(&mut self, args: &[Value]) -> KResult<Vec<Value>> {
+        let Value::Thread(handle) = self.arg_or_nil(args, 0) else {
+            return Err(Self::runtime_error("coroutine.resume expects a thread"));
+        };
+        let (entry, status) = {
+            let thread = self.thread_state_mut(handle)?;
+            (thread.entry, thread.status)
+        };
+        if status != ThreadStatus::Suspended {
+            let message = match status {
+                ThreadStatus::Running => "cannot resume running coroutine",
+                ThreadStatus::Dead => "cannot resume dead coroutine",
+                ThreadStatus::Suspended => "cannot resume coroutine",
+            };
+            let text = self.heap.intern_string(message.as_bytes().to_vec())?;
+            return Ok(vec![Value::boolean(false), Value::string(text)]);
+        }
+        self.thread_state_mut(handle)?.status = ThreadStatus::Running;
+        match self.call_value_multi(entry, args.get(1..).unwrap_or(&[]).to_vec()) {
+            Ok(values) => {
+                self.thread_state_mut(handle)?.status = ThreadStatus::Dead;
+                let mut result = Vec::with_capacity(values.len().saturating_add(1));
+                result.push(Value::boolean(true));
+                result.extend(values);
+                Ok(result)
+            }
+            Err(error) => {
+                self.thread_state_mut(handle)?.status = ThreadStatus::Dead;
+                let text = self.heap.intern_string(error.to_string().into_bytes())?;
+                Ok(vec![Value::boolean(false), Value::string(text)])
+            }
+        }
+    }
+
+    fn coroutine_wrap(&mut self, entry: Value) -> KResult<Value> {
+        let thread = self.coroutine_create(entry)?;
+        let env = self.new_table_handle()?;
+        let index = self.new_table_handle()?;
+        let index_key = self.heap.intern_string(b"__index".to_vec())?;
+        let co_key = self.heap.intern_string(b"co".to_vec())?;
+        let resume_key = self
+            .heap
+            .intern_string(b"__kuu_coroutine_wrap_resume".to_vec())?;
+        self.heap
+            .resolve_table_mut(index)?
+            .raw_set(Value::string(index_key), Value::table(self.globals))?;
+        self.heap.resolve_table_mut(env)?.metatable = Some(index);
+        self.heap
+            .resolve_table_mut(env)?
+            .raw_set(Value::string(co_key), thread)?;
+        self.heap.resolve_table_mut(env)?.raw_set(
+            Value::string(resume_key),
+            Value::native(native_coroutine_wrap_resume),
+        )?;
+        let source = b"return function (...) return __kuu_coroutine_wrap_resume(co, ...) end";
+        let wrapper_factory = self.load_chunk_bytes(source, None, Some(Value::table(env)))?;
+        let wrapped = self.call_value_multi(Value::closure(wrapper_factory), Vec::new())?;
+        wrapped.first().copied().ok_or_else(|| {
+            KError::new(
+                KErrorKind::Runtime("coroutine wrapper factory returned no function".to_owned()),
+                None,
+            )
+        })
+    }
+
+    fn coroutine_wrap_resume(&mut self, args: &[Value]) -> KResult<Vec<Value>> {
+        let mut result = self.coroutine_resume(args)?;
+        match result.first().copied() {
+            Some(Value::Boolean(true)) => {
+                result.remove(0);
+                Ok(result)
+            }
+            Some(Value::Boolean(false)) => Err(Self::runtime_error(
+                self.format_value(result.get(1).copied().unwrap_or(Value::nil()))?,
+            )),
+            _ => Err(Self::runtime_error(
+                "coroutine resume returned an invalid status",
+            )),
+        }
+    }
+
+    fn coroutine_status(&mut self, value: Value) -> KResult<Value> {
+        let Value::Thread(handle) = value else {
+            return Err(Self::runtime_error("coroutine.status expects a thread"));
+        };
+        let status = match self.thread_state_mut(handle)?.status {
+            ThreadStatus::Suspended => b"suspended".as_slice(),
+            ThreadStatus::Running => b"running".as_slice(),
+            ThreadStatus::Dead => b"dead".as_slice(),
+        };
+        Ok(Value::string(self.heap.intern_string(status.to_vec())?))
     }
 
     pub fn run_proto(&mut self, proto: &Proto) -> KResult<Vec<Value>> {
@@ -5927,7 +6067,11 @@ impl Vm {
 
     fn install_coroutine_lib(&mut self) -> KResult<()> {
         let table = self.heap.new_table()?;
-        self.set_module_table("coroutine", table)
+        self.set_module_table("coroutine", table)?;
+        self.set_module_function(table, b"create", native_coroutine_create)?;
+        self.set_module_function(table, b"resume", native_coroutine_resume)?;
+        self.set_module_function(table, b"wrap", native_coroutine_wrap)?;
+        self.set_module_function(table, b"status", native_coroutine_status)
     }
 
     fn install_io_lib(&mut self) -> KResult<()> {
