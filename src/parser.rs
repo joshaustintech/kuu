@@ -978,7 +978,7 @@ impl<'a> Parser<'a> {
             | TokenKind::Keyword(Keyword::Close)
             | TokenKind::Keyword(Keyword::Global) => self.parse_prefix_expression()?,
             TokenKind::LParen => self.parse_prefix_expression()?,
-            _ => return Err(self.error("expected expression")),
+            _ => return Err(self.error("unexpected symbol")),
         };
 
         Ok(expr)

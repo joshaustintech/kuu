@@ -5330,16 +5330,7 @@ impl Vm {
         };
 
         match env {
-            Some(Value::Table(env_table)) => {
-                self.instantiate_root_closure_with_env(proto, env_table)
-            }
-            Some(other) => Err(KError::new(
-                KErrorKind::Runtime(format!(
-                    "load environment must be a table, got {}",
-                    self.value_type_name(other)
-                )),
-                None,
-            )),
+            Some(env) => self.instantiate_root_closure_with_env(proto, env),
             None => self.instantiate_root_closure(proto),
         }
     }
@@ -5347,7 +5338,7 @@ impl Vm {
     fn instantiate_root_closure_with_env(
         &mut self,
         proto: Proto,
-        env: TableHandle,
+        env: Value,
     ) -> KResult<ClosureHandle> {
         let mut upvalues = Vec::with_capacity(proto.upvalues.len());
         for descriptor in &proto.upvalues {
@@ -5358,7 +5349,7 @@ impl Vm {
                 ));
             }
             if descriptor.index == 0 {
-                upvalues.push(self.heap.new_upvalue_closed(Value::table(env))?);
+                upvalues.push(self.heap.new_upvalue_closed(env)?);
             } else {
                 return Err(KError::new(
                     KErrorKind::Runtime("root closure missing parent upvalue".to_owned()),
