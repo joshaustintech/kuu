@@ -536,20 +536,13 @@ impl<'a> FunctionCompiler<'a> {
             return Err(KError::bytecode("generic for requires names"));
         }
 
-        let iterator_reg = self.compile_expr_result(
-            iter.first()
-                .ok_or_else(|| KError::bytecode("generic for missing iterator"))?,
-        )?;
-        let state_reg = if let Some(expr) = iter.get(1) {
-            self.compile_expr_result(expr)?
-        } else {
-            self.load_nil_temp()?
-        };
-        let control_reg = if let Some(expr) = iter.get(2) {
-            self.compile_expr_result(expr)?
-        } else {
-            self.load_nil_temp()?
-        };
+        if iter.is_empty() {
+            return Err(KError::bytecode("generic for missing iterator"));
+        }
+        let iterator_reg = self.alloc_temp()?;
+        let state_reg = self.alloc_temp()?;
+        let control_reg = self.alloc_temp()?;
+        let _ = self.compile_value_list_into(iterator_reg, iter, Some(3), true)?;
 
         let first_name = names
             .first()
@@ -561,11 +554,31 @@ impl<'a> FunctionCompiler<'a> {
         self.loop_stack.push(LoopFrame {
             break_sites: Vec::new(),
         });
+        let call_base = self.alloc_temp()?;
+        let call_slots = usize::max(3, names.len());
+        for _ in 1..call_slots {
+            let _ = self.alloc_temp()?;
+        }
+        let call_state = Register::new(
+            call_base
+                .index()
+                .checked_add(1)
+                .ok_or_else(|| KError::bytecode("register overflow"))?,
+        );
+        let call_control = Register::new(
+            call_base
+                .index()
+                .checked_add(2)
+                .ok_or_else(|| KError::bytecode("register overflow"))?,
+        );
         let loop_start = self.instructions.len();
+        self.emit_move(call_base, iterator_reg)?;
+        self.emit_move(call_state, state_reg)?;
+        self.emit_move(call_control, control_reg)?;
         let call_results = u16::try_from(names.len())
             .map_err(|_| KError::bytecode("generic for arity exceeds u16"))?;
         self.instructions.push(Instruction::Call {
-            function: iterator_reg,
+            function: call_base,
             args: 2,
             results: call_results,
         });
@@ -574,7 +587,7 @@ impl<'a> FunctionCompiler<'a> {
         self.instructions.push(Instruction::Compare {
             op: CompareOp::Eq,
             dst: done_reg,
-            left: iterator_reg,
+            left: call_base,
             right: nil_reg,
         });
         let exit = self.emit_conditional_jump(true, done_reg);
@@ -582,7 +595,7 @@ impl<'a> FunctionCompiler<'a> {
         for (index, name) in names.iter().enumerate() {
             let slot = self.find_decl_slot(name, block.span)?;
             let source = Register::new(
-                iterator_reg
+                call_base
                     .index()
                     .checked_add(
                         u16::try_from(index).map_err(|_| KError::bytecode("register overflow"))?,
@@ -593,8 +606,7 @@ impl<'a> FunctionCompiler<'a> {
         }
 
         self.compile_block(block, false)?;
-        self.emit_move(control_reg, iterator_reg)?;
-        self.emit_move(iterator_reg, state_reg)?;
+        self.emit_move(control_reg, call_base)?;
         self.emit_jump(loop_start)?;
 
         let loop_end = self.instructions.len();

@@ -312,6 +312,27 @@ fn tail_method_call_passes_receiver() -> Result<(), Box<dyn std::error::Error>> 
 }
 
 #[test]
+fn generic_for_preserves_iterator_state_and_multi_results() -> Result<(), Box<dyn std::error::Error>>
+{
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "for i, value in ipairs({ 10, 20 }) do print(i, value) end".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+
+    let expected = ExpectedRun {
+        stdout: b"1\t10\n2\t20\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+
+    assert!(compare_run(&actual, &expected).is_ok());
+    Ok(())
+}
+
+#[test]
 fn type_requires_a_value_argument() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
         args: vec!["-e".to_owned(), "print(pcall(type))".to_owned()],
