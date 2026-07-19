@@ -4942,6 +4942,10 @@ impl Vm {
         32
     }
 
+    fn call_metamethod_depth_limit(&self) -> usize {
+        16
+    }
+
     fn call_value_sync(
         &mut self,
         callee: Value,
@@ -5050,21 +5054,27 @@ impl Vm {
         mut callee: Value,
         mut args: Vec<Value>,
     ) -> KResult<(Value, Vec<Value>)> {
-        for _ in 0..self.metamethod_depth_limit() {
+        for _ in 0..self.call_metamethod_depth_limit() {
             if matches!(callee, Value::NativeFunction(_) | Value::Closure(_)) {
                 return Ok((callee, args));
             }
-            let Some(metatable) = self.metatable_of_value(callee) else {
-                break;
-            };
-            let Some(call) = self.table_metamethod(metatable, "__call")? else {
-                break;
-            };
+            let metatable = self.metatable_of_value(callee).ok_or_else(|| {
+                KError::new(
+                    KErrorKind::Runtime("attempt to call a non-callable value".to_owned()),
+                    None,
+                )
+            })?;
+            let call = self.table_metamethod(metatable, "__call")?.ok_or_else(|| {
+                KError::new(
+                    KErrorKind::Runtime("attempt to call a non-callable value".to_owned()),
+                    None,
+                )
+            })?;
             args.insert(0, callee);
             callee = call;
         }
         Err(KError::new(
-            KErrorKind::Runtime("attempt to call a non-callable value".to_owned()),
+            KErrorKind::Runtime("__call chain too long".to_owned()),
             None,
         ))
     }

@@ -634,6 +634,26 @@ fn debug_getinfo_t_reports_current_function_extraargs() -> Result<(), Box<dyn st
 }
 
 #[test]
+fn call_metamethod_chain_allows_fifteen_links_and_rejects_sixteen()
+-> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local function make(n) local f = function() return 42 end; for _ = 1, n do f = setmetatable({}, {__call = f}) end; return f end; print(make(15)()); local ok, message = pcall(function() return make(16)() end); print(ok, string.find(message, 'too long') ~= nil)"
+                .to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"42\nfalse\ttrue\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn table_concat_joins_range_with_separator() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
         args: vec![
