@@ -158,6 +158,25 @@ impl<'a> Parser<'a> {
         }
 
         if self.at_keyword(Keyword::Global) {
+            if matches!(self.next.kind, TokenKind::Assign) {
+                let name_span = self.current.span;
+                self.advance()?;
+                self.consume_punct(TokenKind::Assign)?;
+                let values = self.parse_expression_list()?;
+                let end = self.expr_span(
+                    values
+                        .last()
+                        .ok_or_else(|| self.error("missing global assignment value"))?,
+                );
+                return Ok(Stmt::Assign {
+                    span: self.merge_span(name_span, end),
+                    targets: vec![Var {
+                        span: name_span,
+                        kind: VarKind::Name("global".to_owned()),
+                    }],
+                    values,
+                });
+            }
             return self.parse_global_statement();
         }
 
@@ -307,6 +326,11 @@ impl<'a> Parser<'a> {
                 let span = self.current.span;
                 self.advance()?;
                 Ok(("close".to_owned(), span))
+            }
+            TokenKind::Keyword(Keyword::Global) => {
+                let span = self.current.span;
+                self.advance()?;
+                Ok(("global".to_owned(), span))
             }
             _ => Err(self.error(error)),
         }
@@ -780,6 +804,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::Keyword(Keyword::True)
                 | TokenKind::Keyword(Keyword::Const)
                 | TokenKind::Keyword(Keyword::Close)
+                | TokenKind::Keyword(Keyword::Global)
                 | TokenKind::Keyword(Keyword::Function)
                 | TokenKind::DotDotDot
                 | TokenKind::LParen
@@ -953,7 +978,8 @@ impl<'a> Parser<'a> {
             TokenKind::LBrace => self.parse_table_constructor()?,
             TokenKind::Name(_)
             | TokenKind::Keyword(Keyword::Const)
-            | TokenKind::Keyword(Keyword::Close) => self.parse_prefix_expression()?,
+            | TokenKind::Keyword(Keyword::Close)
+            | TokenKind::Keyword(Keyword::Global) => self.parse_prefix_expression()?,
             TokenKind::LParen => self.parse_prefix_expression()?,
             _ => return Err(self.error("expected expression")),
         };
@@ -965,7 +991,8 @@ impl<'a> Parser<'a> {
         let mut expr = match self.current_kind() {
             TokenKind::Name(_)
             | TokenKind::Keyword(Keyword::Const)
-            | TokenKind::Keyword(Keyword::Close) => {
+            | TokenKind::Keyword(Keyword::Close)
+            | TokenKind::Keyword(Keyword::Global) => {
                 let (name, span) = self.consume_name()?;
                 Expr::Name { span, name }
             }
