@@ -879,6 +879,24 @@ fn debug_upvaluejoin_shares_storage() -> Result<(), Box<dyn std::error::Error>> 
 }
 
 #[test]
+fn string_pack_supports_binary_header_formats() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local s = string.pack('c4BBc6BiBI4BjBn', '\\27Lua', 0x55, 0, 'abc123', 1, -2, 4, 0x12345678, 8, -3, 8, -370.5); local a,b,c,d,e,f,g,h,i,j,k,n = string.unpack('c4BBc6BiBI4BjBn', s); print(#s, a, b, c, d, e, f, g, h, i, j, k, n)".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"44\t\x1bLua\t85\t0\tabc123\t1\t-2\t4\t305419896\t8\t-3\t8\t-370.5\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn collectgarbage_terminates_on_unreachable_closure_cycles()
 -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {

@@ -1590,25 +1590,108 @@ pub fn native_string_rep(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
 
 pub fn native_string_packsize(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     let format = vm.string_text_arg(args, 0)?;
-    if format == "j" || format == "n" {
-        return Ok(vec![Value::integer(8)]);
+    let mut size = 0usize;
+    let bytes = format.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        let code = *bytes
+            .get(index)
+            .ok_or_else(|| Vm::runtime_error("invalid pack format"))? as char;
+        index += 1;
+        let start = index;
+        while index < bytes.len() && bytes.get(index).is_some_and(u8::is_ascii_digit) {
+            index += 1;
+        }
+        let count = if start == index {
+            1
+        } else {
+            format[start..index]
+                .parse::<usize>()
+                .map_err(|_| Vm::runtime_error("invalid pack format"))?
+        };
+        size = size.saturating_add(match code {
+            'c' => count,
+            'B' => count,
+            'i' | 'j' | 'n' => 8 * count,
+            'I' => count,
+            _ => return Err(Vm::runtime_error("unsupported pack format")),
+        });
     }
-    Err(Vm::runtime_error("unsupported pack format"))
+    Ok(vec![Value::integer(
+        i64::try_from(size).map_err(|_| Vm::runtime_error("pack size overflow"))?,
+    )])
 }
 
 pub fn native_string_pack(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     let format = vm.string_text_arg(args, 0)?;
-    let bytes = match format.as_str() {
-        "j" => vm
-            .integer_arg(args, 1, "integer expected")?
-            .to_ne_bytes()
-            .to_vec(),
-        "n" => vm
-            .number_arg(args, 1, "number expected")?
-            .to_ne_bytes()
-            .to_vec(),
-        _ => return Err(Vm::runtime_error("unsupported pack format")),
-    };
+    let mut bytes = Vec::new();
+    let mut arg = 1usize;
+    let format_bytes = format.as_bytes();
+    let mut index = 0;
+    while index < format_bytes.len() {
+        let code = *format_bytes
+            .get(index)
+            .ok_or_else(|| Vm::runtime_error("invalid pack format"))? as char;
+        index += 1;
+        let start = index;
+        while index < format_bytes.len() && format_bytes.get(index).is_some_and(u8::is_ascii_digit)
+        {
+            index += 1;
+        }
+        let count = if start == index {
+            1
+        } else {
+            format[start..index]
+                .parse::<usize>()
+                .map_err(|_| Vm::runtime_error("invalid pack format"))?
+        };
+        match code {
+            'c' => {
+                let value = vm.string_bytes_arg_typed(args, arg, "string expected")?;
+                if value.len() != count {
+                    return Err(Vm::runtime_error("string length does not fit format"));
+                }
+                bytes.extend(value);
+                arg += 1;
+            }
+            'B' => {
+                for _ in 0..count {
+                    bytes.push(
+                        u8::try_from(vm.integer_arg(args, arg, "integer expected")?)
+                            .map_err(|_| Vm::runtime_error("integer out of range"))?,
+                    );
+                    arg += 1;
+                }
+            }
+            'i' | 'j' => {
+                for _ in 0..count {
+                    bytes.extend(vm.integer_arg(args, arg, "integer expected")?.to_ne_bytes());
+                    arg += 1;
+                }
+            }
+            'I' => {
+                let value = vm.integer_arg(args, arg, "integer expected")?;
+                match count {
+                    1 => bytes.push(
+                        u8::try_from(value)
+                            .map_err(|_| Vm::runtime_error("integer out of range"))?,
+                    ),
+                    2 => bytes.extend((value as u16).to_ne_bytes()),
+                    4 => bytes.extend((value as u32).to_ne_bytes()),
+                    8 => bytes.extend(value.to_ne_bytes()),
+                    _ => return Err(Vm::runtime_error("unsupported pack format")),
+                }
+                arg += 1;
+            }
+            'n' => {
+                for _ in 0..count {
+                    bytes.extend(vm.number_arg(args, arg, "number expected")?.to_ne_bytes());
+                    arg += 1;
+                }
+            }
+            _ => return Err(Vm::runtime_error("unsupported pack format")),
+        }
+    }
     let handle = vm.heap.intern_string(bytes)?;
     Ok(vec![Value::string(handle)])
 }
@@ -1622,19 +1705,93 @@ pub fn native_string_unpack(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> 
         _ => return Err(Vm::runtime_error("integer expected")),
     };
     let start = usize::try_from(start.saturating_sub(1)).unwrap_or(usize::MAX);
-    let slice = bytes
-        .get(start..start.saturating_add(8))
-        .ok_or_else(|| Vm::runtime_error("data string too short"))?;
-    let array: [u8; 8] = slice
-        .try_into()
-        .map_err(|_| Vm::runtime_error("data string too short"))?;
-    let value = match format.as_str() {
-        "j" => Value::integer(i64::from_ne_bytes(array)),
-        "n" => Value::number(f64::from_ne_bytes(array)),
-        _ => return Err(Vm::runtime_error("unsupported pack format")),
-    };
-    let next = i64::try_from(start.saturating_add(9)).unwrap_or(i64::MAX);
-    Ok(vec![value, Value::integer(next)])
+    let mut offset = start;
+    let mut values = Vec::new();
+    let format_bytes = format.as_bytes();
+    let mut index = 0;
+    while index < format_bytes.len() {
+        let code = *format_bytes
+            .get(index)
+            .ok_or_else(|| Vm::runtime_error("invalid pack format"))? as char;
+        index += 1;
+        let digit_start = index;
+        while index < format_bytes.len() && format_bytes.get(index).is_some_and(u8::is_ascii_digit)
+        {
+            index += 1;
+        }
+        let count = if digit_start == index {
+            1
+        } else {
+            format[digit_start..index]
+                .parse::<usize>()
+                .map_err(|_| Vm::runtime_error("invalid pack format"))?
+        };
+        let repetitions = if (code == 'c' || code == 'I') && count > 1 {
+            1
+        } else {
+            count
+        };
+        for _ in 0..repetitions {
+            let width = match code {
+                'c' => count,
+                'B' => 1,
+                'I' => count,
+                'i' | 'j' | 'n' => 8,
+                _ => return Err(Vm::runtime_error("unsupported pack format")),
+            };
+            let slice = bytes
+                .get(offset..offset.saturating_add(width))
+                .ok_or_else(|| Vm::runtime_error("data string too short"))?;
+            let value = match code {
+                'c' => Value::string(vm.heap.intern_string(slice.to_vec())?),
+                'B' => Value::integer(i64::from(
+                    *slice
+                        .first()
+                        .ok_or_else(|| Vm::runtime_error("data string too short"))?,
+                )),
+                'I' => Value::integer(match count {
+                    1 => i64::from(
+                        *slice
+                            .first()
+                            .ok_or_else(|| Vm::runtime_error("data string too short"))?,
+                    ),
+                    2 => i64::from(u16::from_ne_bytes(
+                        slice
+                            .try_into()
+                            .map_err(|_| Vm::runtime_error("data string too short"))?,
+                    )),
+                    4 => i64::from(u32::from_ne_bytes(
+                        slice
+                            .try_into()
+                            .map_err(|_| Vm::runtime_error("data string too short"))?,
+                    )),
+                    8 => i64::from_ne_bytes(
+                        slice
+                            .try_into()
+                            .map_err(|_| Vm::runtime_error("data string too short"))?,
+                    ),
+                    _ => return Err(Vm::runtime_error("unsupported pack format")),
+                }),
+                'i' | 'j' => Value::integer(i64::from_ne_bytes(
+                    slice
+                        .try_into()
+                        .map_err(|_| Vm::runtime_error("data string too short"))?,
+                )),
+                'n' => Value::number(f64::from_ne_bytes(
+                    slice
+                        .try_into()
+                        .map_err(|_| Vm::runtime_error("data string too short"))?,
+                )),
+                _ => return Err(Vm::runtime_error("unsupported pack format")),
+            };
+            values.push(value);
+            offset = offset.saturating_add(width);
+        }
+    }
+    values.push(Value::integer(
+        i64::try_from(offset.saturating_add(1)).unwrap_or(i64::MAX),
+    ));
+    Ok(values)
 }
 
 pub fn native_string_lower(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
