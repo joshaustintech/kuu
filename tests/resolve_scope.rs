@@ -122,6 +122,13 @@ fn global_declarations_control_free_names_and_reads_only_globals() -> Result<(),
 }
 
 #[test]
+fn environment_cannot_be_declared_global() -> Result<(), String> {
+    let error = expect_err("global _ENV, value; value = 1\n")?;
+    assert!(error.contains("variable 'value'"));
+    Ok(())
+}
+
+#[test]
 fn function_statements_write_through_the_resolver() -> Result<(), String> {
     let chunk = resolve("global X\nfunction X() end\n")?;
 

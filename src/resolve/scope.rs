@@ -211,6 +211,17 @@ impl Resolver {
                 names,
                 values,
             } => {
+                if names.iter().any(|name| name.name == "_ENV") {
+                    let reported = names
+                        .iter()
+                        .find(|name| name.name != "_ENV")
+                        .map(|name| name.name.as_str())
+                        .unwrap_or("_ENV");
+                    return Err(KError::syntax(
+                        format!("variable '{reported}' cannot be declared global with _ENV"),
+                        *span,
+                    ));
+                }
                 for value in values {
                     self.resolve_expr(value, state)?;
                 }
