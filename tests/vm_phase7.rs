@@ -861,6 +861,24 @@ fn binary_loaded_closures_start_with_nil_upvalues() -> Result<(), Box<dyn std::e
 }
 
 #[test]
+fn debug_upvaluejoin_shares_storage() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local a, b = 1, 2; local f = function() return a end; local g = function() return b end; debug.upvaluejoin(f, 1, g, 1); print(f())".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"2\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn collectgarbage_terminates_on_unreachable_closure_cycles()
 -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {

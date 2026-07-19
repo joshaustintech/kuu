@@ -2863,6 +2863,43 @@ pub fn native_debug_setupvalue(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value
     Ok(vec![Value::string(vm.heap.intern_string(name.to_vec())?)])
 }
 
+pub fn native_debug_upvaluejoin(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let destination = match vm.arg_or_nil(args, 0) {
+        Value::Closure(handle) => handle,
+        value => return Err(vm.type_error("function expected", value)),
+    };
+    let destination_index = vm.integer_arg(args, 1, "upvalue index expected")?;
+    let source = match vm.arg_or_nil(args, 2) {
+        Value::Closure(handle) => handle,
+        value => return Err(vm.type_error("function expected", value)),
+    };
+    let source_index = vm.integer_arg(args, 3, "upvalue index expected")?;
+    if destination_index < 1 || source_index < 1 {
+        return Err(Vm::runtime_error("upvalue index out of range"));
+    }
+    let source_handle = vm
+        .heap
+        .resolve_closure(source)?
+        .upvalues
+        .get(
+            usize::try_from(source_index - 1)
+                .map_err(|_| Vm::runtime_error("upvalue index out of range"))?,
+        )
+        .copied()
+        .ok_or_else(|| Vm::runtime_error("upvalue index out of range"))?;
+    let destination_slot = vm
+        .heap
+        .resolve_closure_mut(destination)?
+        .upvalues
+        .get_mut(
+            usize::try_from(destination_index - 1)
+                .map_err(|_| Vm::runtime_error("upvalue index out of range"))?,
+        )
+        .ok_or_else(|| Vm::runtime_error("upvalue index out of range"))?;
+    *destination_slot = source_handle;
+    Ok(Vec::new())
+}
+
 stub_native!(
     native_string_gmatch,
     native_utf8_char,
@@ -2874,7 +2911,6 @@ stub_native!(
     native_io_lines,
     native_package_loadlib,
     native_debug_traceback,
-    native_debug_upvaluejoin,
     native_debug_getlocal,
     native_debug_setlocal,
     native_debug_gethook,
