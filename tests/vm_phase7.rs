@@ -168,6 +168,25 @@ fn nan_ordering_comparisons_are_false() -> Result<(), Box<dyn std::error::Error>
 }
 
 #[test]
+fn nan_table_lookup_is_nil_but_writes_fail() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local nan, t = 0 / 0, {}; local ok = pcall(rawset, t, nan, 1); print(t[nan] == nil, ok)"
+                .to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"true\tfalse\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn literal_integer_floor_division_by_zero_errors_when_called()
 -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {

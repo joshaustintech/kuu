@@ -158,10 +158,7 @@ impl TableObject {
                     .unwrap_or(Value::nil()))
             }
             Some(hash_key) => Ok(self.hash.get(&hash_key).copied().unwrap_or(Value::nil())),
-            None => Err(KError::new(
-                KErrorKind::Runtime("table index is not hashable".to_owned()),
-                None,
-            )),
+            None => Ok(Value::nil()),
         }
     }
 
