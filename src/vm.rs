@@ -3909,13 +3909,14 @@ impl Vm {
             ));
         }
         let (left, right) = self.coerce_numbers(left, right)?;
-        if right == 0.0 {
-            return Err(KError::new(
-                KErrorKind::Runtime("division by zero".to_owned()),
-                None,
-            ));
-        }
-        Ok(Value::number(left - (left / right).floor() * right))
+        let remainder = left % right;
+        Ok(Value::number(
+            if remainder != 0.0 && (left < 0.0) != (right < 0.0) {
+                remainder + right
+            } else {
+                remainder
+            },
+        ))
     }
 
     fn numeric_pow(&self, left: Value, right: Value) -> KResult<Value> {

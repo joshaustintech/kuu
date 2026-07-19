@@ -423,6 +423,25 @@ fn floating_modulo_uses_lua_floor_semantics() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
+fn floating_modulo_keeps_high_power_precision_and_nan_zero_divisor()
+-> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local nan = 0.0 % 0; print(2^60 % 3, 2^61 % 3, nan ~= nan)".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"1\t2\ttrue\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn prints_the_hello_fixture() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary(&fixture_path("hello.lua"))?;
     let expected = ExpectedRun {
