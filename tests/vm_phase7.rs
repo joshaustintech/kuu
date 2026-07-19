@@ -888,7 +888,7 @@ fn string_pack_supports_binary_header_formats() -> Result<(), Box<dyn std::error
         ..RunOptions::default()
     })?;
     let expected = ExpectedRun {
-        stdout: b"44\t\x1bLua\t85\t0\tabc123\t1\t-2\t4\t305419896\t8\t-3\t8\t-370.5\n",
+        stdout: b"40\t\x1bLua\t85\t0\tabc123\t1\t-2\t4\t305419896\t8\t-3\t8\t-370.5\n",
         stderr: b"",
         exit_code: Some(0),
     };

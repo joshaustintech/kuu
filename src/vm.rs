@@ -1244,7 +1244,15 @@ pub fn native_string_dump(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
         }
     };
     let proto = &vm.heap.resolve_closure(closure)?.proto;
-    let mut bytes = b"KUUBIN\0".to_vec();
+    let mut bytes = b"\x1bLua\x55\0\x19\x93\r\n\x1a\n".to_vec();
+    bytes.push(4);
+    bytes.extend((-0x5678_i32).to_ne_bytes());
+    bytes.push(4);
+    bytes.extend(0x12345678_u32.to_ne_bytes());
+    bytes.push(8);
+    bytes.extend((-0x5678_i64).to_ne_bytes());
+    bytes.push(8);
+    bytes.extend((-370.5_f64).to_ne_bytes());
     bytes.extend(proto.encode()?);
     let handle = vm.heap.intern_string(bytes)?;
     Ok(vec![Value::string(handle)])
@@ -1612,7 +1620,8 @@ pub fn native_string_packsize(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>
         size = size.saturating_add(match code {
             'c' => count,
             'B' => count,
-            'i' | 'j' | 'n' => 8 * count,
+            'i' => 4 * count,
+            'j' | 'n' => 8 * count,
             'I' => count,
             _ => return Err(Vm::runtime_error("unsupported pack format")),
         });
@@ -1663,7 +1672,13 @@ pub fn native_string_pack(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
                     arg += 1;
                 }
             }
-            'i' | 'j' => {
+            'i' => {
+                let value = i32::try_from(vm.integer_arg(args, arg, "integer expected")?)
+                    .map_err(|_| Vm::runtime_error("integer out of range"))?;
+                bytes.extend(value.to_ne_bytes());
+                arg += 1;
+            }
+            'j' => {
                 for _ in 0..count {
                     bytes.extend(vm.integer_arg(args, arg, "integer expected")?.to_ne_bytes());
                     arg += 1;
@@ -1736,7 +1751,8 @@ pub fn native_string_unpack(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> 
                 'c' => count,
                 'B' => 1,
                 'I' => count,
-                'i' | 'j' | 'n' => 8,
+                'i' => 4,
+                'j' | 'n' => 8,
                 _ => return Err(Vm::runtime_error("unsupported pack format")),
             };
             let slice = bytes
@@ -1772,7 +1788,12 @@ pub fn native_string_unpack(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> 
                     ),
                     _ => return Err(Vm::runtime_error("unsupported pack format")),
                 }),
-                'i' | 'j' => Value::integer(i64::from_ne_bytes(
+                'i' => Value::integer(i64::from(i32::from_ne_bytes(
+                    slice
+                        .try_into()
+                        .map_err(|_| Vm::runtime_error("data string too short"))?,
+                ))),
+                'j' => Value::integer(i64::from_ne_bytes(
                     slice
                         .try_into()
                         .map_err(|_| Vm::runtime_error("data string too short"))?,
@@ -5555,7 +5576,8 @@ impl Vm {
         mode: Option<&str>,
         env: Option<Value>,
     ) -> KResult<ClosureHandle> {
-        let is_binary = bytes.starts_with(b"KUUBIN\0");
+        let lua_binary = bytes.starts_with(b"\x1bLua");
+        let is_binary = lua_binary || bytes.starts_with(b"KUUBIN\0");
         let bytes = if !is_binary && bytes.starts_with(&[0xef, 0xbb, 0xbf]) {
             bytes.get(3..).unwrap_or(&[])
         } else {
@@ -5578,7 +5600,8 @@ impl Vm {
         }
 
         let proto = if is_binary {
-            Proto::decode(bytes.get(7..).ok_or_else(|| {
+            let header_len = if lua_binary { 40 } else { 7 };
+            Proto::decode(bytes.get(header_len..).ok_or_else(|| {
                 KError::new(
                     KErrorKind::Runtime("binary chunk header truncated".to_owned()),
                     None,
