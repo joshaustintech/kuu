@@ -940,6 +940,40 @@ macro_rules! stub_native {
     };
 }
 
+pub fn native_table_concat(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let table = vm.table_arg(args, 0, "table expected")?;
+    let separator = match vm.arg_or_nil(args, 1) {
+        Value::Nil => String::new(),
+        Value::String(handle) => vm.string_text_from_handle(handle)?,
+        value => return Err(vm.type_error("string expected", value)),
+    };
+    let start = match vm.arg_or_nil(args, 2) {
+        Value::Nil => 1,
+        _ => vm.integer_arg(args, 2, "integer expected")?,
+    };
+    let end = match vm.arg_or_nil(args, 3) {
+        Value::Nil => i64::try_from(vm.heap.resolve_table(table)?.array.len()).unwrap_or(i64::MAX),
+        _ => vm.integer_arg(args, 3, "integer expected")?,
+    };
+    let mut pieces = Vec::new();
+    for index in start..=end {
+        let value = vm
+            .heap
+            .resolve_table(table)?
+            .raw_get(Value::integer(index))?;
+        match value {
+            Value::String(handle) => pieces.push(vm.string_text_from_handle(handle)?),
+            Value::Integer(value) => pieces.push(value.to_string()),
+            Value::Number(value) => pieces.push(value.to_string()),
+            value => return Err(vm.type_error("string expected", value)),
+        }
+    }
+    let handle = vm
+        .heap
+        .intern_string(pieces.join(&separator).into_bytes())?;
+    Ok(vec![Value::string(handle)])
+}
+
 pub fn native_string_dump(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     let closure = match vm.arg_or_nil(args, 0) {
         Value::Closure(handle) => handle,
@@ -2385,7 +2419,6 @@ stub_native!(
     native_utf8_codes,
     native_utf8_codepoint,
     native_utf8_len,
-    native_table_concat,
     native_table_insert,
     native_table_remove,
     native_table_move,
