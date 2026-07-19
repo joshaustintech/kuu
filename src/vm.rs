@@ -1570,7 +1570,9 @@ pub fn native_math_min(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
 pub fn native_math_random(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     let rv = vm.math_next_u64();
     match args.len() {
-        0 => Ok(vec![Value::number(vm.math_next_f64())]),
+        0 => Ok(vec![Value::number(
+            (rv >> 11) as f64 * (1.0 / ((1u64 << 53) as f64)),
+        )]),
         1 => {
             let upper = vm.integer_arg(args, 0, "integer expected")?;
             if upper == 0 {

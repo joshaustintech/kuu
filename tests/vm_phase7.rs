@@ -187,6 +187,24 @@ fn nan_table_lookup_is_nil_but_writes_fail() -> Result<(), Box<dyn std::error::E
 }
 
 #[test]
+fn math_random_seeded_float_uses_first_rng_word() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "math.randomseed(1007, 0); print(math.random() == 0x0.7a7040a5a323c9d6)".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"true\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn literal_integer_floor_division_by_zero_errors_when_called()
 -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
