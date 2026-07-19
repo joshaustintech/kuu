@@ -845,10 +845,7 @@ impl<'a> Parser<'a> {
             self.parse_primary_expression()?
         };
 
-        loop {
-            let Some((op, precedence, assoc)) = self.current_binary_op() else {
-                break;
-            };
+        while let Some((op, precedence, assoc)) = self.current_binary_op() {
             if precedence < min_bp {
                 break;
             }
