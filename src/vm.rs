@@ -836,7 +836,12 @@ pub fn native_load(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     match vm.load_chunk_bytes(&source, mode.as_deref(), env) {
         Ok(closure) => Ok(vec![Value::closure(closure)]),
         Err(error) => {
-            let message = vm.heap.intern_string(error.to_string().into_bytes())?;
+            let rendered = if let Some(span) = error.span() {
+                format!(":{}: {error}", span.start_line)
+            } else {
+                error.to_string()
+            };
+            let message = vm.heap.intern_string(rendered.into_bytes())?;
             Ok(vec![Value::nil(), Value::string(message)])
         }
     }
@@ -1036,7 +1041,24 @@ pub fn native_string_find(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
             .map_err(|_| KError::new(KErrorKind::Runtime("position overflow".to_owned()), None))?;
         return Ok(vec![Value::integer(pos), Value::integer(pos - 1)]);
     }
-    let needle = pattern;
+    let needle = if plain {
+        pattern
+    } else {
+        let mut unescaped = Vec::with_capacity(pattern.len());
+        let mut bytes = pattern.iter().copied();
+        while let Some(byte) = bytes.next() {
+            if byte == b'%' {
+                if let Some(escaped) = bytes.next() {
+                    unescaped.push(escaped);
+                } else {
+                    unescaped.push(byte);
+                }
+            } else {
+                unescaped.push(byte);
+            }
+        }
+        unescaped
+    };
     let haystack = haystack.get(start_index..).unwrap_or(&[]);
     let search =
         if !plain && let Some(wildcard) = needle.windows(2).position(|window| window == b".*") {

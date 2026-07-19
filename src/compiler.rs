@@ -301,7 +301,12 @@ impl<'a> FunctionCompiler<'a> {
                 names,
                 values,
             } => self.compile_local_decl(*span, prefix_attribute.as_ref(), names, values),
-            Stmt::GlobalDecl { names, values, .. } => self.compile_global_decl(names, values),
+            Stmt::GlobalDecl {
+                span,
+                names,
+                values,
+                ..
+            } => self.compile_global_decl(*span, names, values),
             Stmt::GlobalAll { .. } => Ok(()),
             Stmt::Assign {
                 targets, values, ..
@@ -783,6 +788,7 @@ impl<'a> FunctionCompiler<'a> {
 
     fn compile_global_decl(
         &mut self,
+        span: KSpan,
         names: &[crate::ast::AttributedName],
         values: &[Expr],
     ) -> KResult<()> {
@@ -802,10 +808,12 @@ impl<'a> FunctionCompiler<'a> {
             );
             let produced = usize::from(source.index().saturating_sub(start.index()));
             if produced < written {
-                self.emit_set_global(&name.name, source)?;
+                let target = self.find_name_target(&name.name, span, true)?;
+                self.store_name_target(target, &name.name, source)?;
             } else {
                 let nil = self.load_nil_temp()?;
-                self.emit_set_global(&name.name, nil)?;
+                let target = self.find_name_target(&name.name, span, true)?;
+                self.store_name_target(target, &name.name, nil)?;
             }
         }
         Ok(())

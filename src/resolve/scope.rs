@@ -237,6 +237,10 @@ impl Resolver {
                         true,
                         DeclarationKind::Global,
                     );
+                    if !values.is_empty() {
+                        let (binding, _) = state.lookup_global(&name.name, *span)?;
+                        state.record_use(name.name.clone(), *span, true, binding);
+                    }
                 }
                 if !state.has_global_default {
                     state.global_policy = GlobalPolicy::DeclaredOnly;
