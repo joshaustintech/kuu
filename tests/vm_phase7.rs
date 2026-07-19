@@ -261,6 +261,25 @@ fn math_fmod_preserves_float_result_for_float_input() -> Result<(), Box<dyn std:
 }
 
 #[test]
+fn goto_uses_nearest_same_named_label() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "do local n = 0; ::again:: n = n + 1; if n < 2 then goto again end end; do local n = 0; ::again:: n = n + 1; if n < 3 then goto again end; print(n) end"
+                .to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"3\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn literal_integer_floor_division_by_zero_errors_when_called()
 -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {

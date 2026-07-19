@@ -78,8 +78,8 @@ struct FunctionCompiler<'a> {
     nested: Vec<Proto>,
     constants: Vec<Constant>,
     constant_lookup: BTreeMap<ConstantKey, u32>,
-    labels: BTreeMap<String, usize>,
-    goto_patches: Vec<(usize, String)>,
+    labels: BTreeMap<String, Vec<(KSpan, usize)>>,
+    goto_patches: Vec<(usize, String, KSpan)>,
     block_stack: Vec<BlockFrame>,
     loop_stack: Vec<LoopFrame>,
     next_temp: u16,
@@ -237,9 +237,12 @@ impl<'a> FunctionCompiler<'a> {
         match stmt {
             Stmt::Empty { .. } => Ok(()),
             Stmt::Break { .. } => self.compile_break(),
-            Stmt::Goto { name, .. } => self.compile_goto(name),
-            Stmt::Label { name, .. } => {
-                self.labels.insert(name.clone(), self.instructions.len());
+            Stmt::Goto { span, name } => self.compile_goto(name, *span),
+            Stmt::Label { span, name } => {
+                self.labels
+                    .entry(name.clone())
+                    .or_default()
+                    .push((*span, self.instructions.len()));
                 Ok(())
             }
             Stmt::Do { block, .. } => self.compile_block(block, false),
@@ -386,10 +389,10 @@ impl<'a> FunctionCompiler<'a> {
         Ok(())
     }
 
-    fn compile_goto(&mut self, name: &str) -> KResult<()> {
+    fn compile_goto(&mut self, name: &str, span: KSpan) -> KResult<()> {
         self.emit_close_for_active_scopes()?;
         let jump = self.emit_jump_placeholder();
-        self.goto_patches.push((jump, name.to_owned()));
+        self.goto_patches.push((jump, name.to_owned(), span));
         Ok(())
     }
 
@@ -1598,11 +1601,25 @@ impl<'a> FunctionCompiler<'a> {
 
     fn patch_gotos(&mut self) -> KResult<()> {
         let patches = self.goto_patches.clone();
-        for (index, name) in patches {
-            let target = self
+        for (index, name, goto_span) in patches {
+            let labels = self
                 .labels
                 .get(&name)
-                .copied()
+                .ok_or_else(|| KError::bytecode(format!("unresolved label '{name}'")))?;
+            let target = labels
+                .iter()
+                .filter(|(span, _)| {
+                    span.start_line < goto_span.start_line
+                        || (span.start_line == goto_span.start_line
+                            && span.start_column <= goto_span.start_column)
+                })
+                .max_by_key(|(span, _)| (span.start_line, span.start_column))
+                .or_else(|| {
+                    labels
+                        .iter()
+                        .min_by_key(|(span, _)| (span.start_line, span.start_column))
+                })
+                .map(|(_, target)| *target)
                 .ok_or_else(|| KError::bytecode(format!("unresolved label '{name}'")))?;
             self.patch_jump(index, target)?;
         }
