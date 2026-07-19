@@ -71,12 +71,12 @@ guessing.
 
 | Item | State | Evidence / next proof |
 | --- | --- | --- |
-| Authority files and branch provenance | blocked | 2026-07-19, `b01ed96`: local `main` is 47 commits behind `origin/main`; `git push` was rejected as non-fast-forward. Local tracked `ROADMAP.md` remains absent. Safe integration of `origin/main` needs approval because local user changes are present. |
+| Authority files and branch provenance | complete | 2026-07-19, `94e6f100f25403e9c89b13c350aa2736860256ee`: stashed local changes, rebased the local conformance commit onto `origin/main`, restored the stash, and `git push` updated `main` from `cb38b3f9` to `94e6f100`. `ROADMAP.md` and this harness are tracked. |
 | Milestones 1-6 | in progress | Origin roadmap says full corpus is expected to fail. Do not mark any complete until its fixture and conformance receipts exist. |
-| Phase 12 full conformance | in progress | 2026-07-19, `731ba960a10b1df64a1248349af797575301af6b` plus uncommitted `src/vm.rs` and `tests/phase11_cli.rs`: minimized `load(..., nil)` and empty `file:read("*a")` regressions failed first; both now pass. Manual `/Users/josh/lua-5.5.0-tests/all.lua` advances past its empty-input check and next fails in `main.lua` with `runtime error: string expected`. Next: isolate that supported failure. Local checkout still lacks `scripts/run-upstream-smoke.sh`. |
+| Phase 12 full conformance | in progress | 2026-07-19, `94e6f100f25403e9c89b13c350aa2736860256ee` plus uncommitted `scripts/run-upstream-smoke.sh`: the runner now kills timed-out child processes and reports timeouts. `KUU_SMOKE_TIMEOUT_SECONDS=1 ./scripts/run-upstream-smoke.sh` exits 26 after classifying all 34 scripts: 8 pass, 22 fail, 4 timeout; `main.lua` now passes. Next: minimize the first remaining supported script failure (`calls.lua`). |
 | GC/finalizers | blocked | Lua-level table `__gc` finalizer remains unproven/failing. Add failing-first regression, then prove finalizer and `__close` order/error behavior. |
 | IO library | blocked | `file:seek()` and `io.lines()` remain failing/unimplemented. Add fixture-level regressions and run affected upstream scripts. |
-| QA gate | blocked | 2026-07-19, `731ba960a10b1df64a1248349af797575301af6b` plus uncommitted `src/parser.rs`, `src/vm.rs`, and `tests/phase11_cli.rs`: `cargo fmt --check`, `cargo test`, and `cargo clippy --all-targets -- -D warnings` exit 0. Forbidden-pattern scan reports only crate-root `#![forbid(unsafe_code)]`. Upstream runner receipt still absent because this checkout lacks `scripts/run-upstream-smoke.sh`. |
+| QA gate | blocked | 2026-07-19, `94e6f100f25403e9c89b13c350aa2736860256ee`: after `cargo clean`, `cargo fmt --check`, `cargo test`, and `cargo clippy --all-targets -- -D warnings` exit 0. Forbidden-pattern scan reports only crate-root `#![forbid(unsafe_code)]`. Deterministic smoke receipt exists but 26 supported scripts still fail or time out. |
 | Tooling phases 13-16 | not started | `kuulsp`, MCP server, `kuufmt`, and `kuulint` have no current implementation or integration receipts. |
 
 ## Loop Procedure
