@@ -795,6 +795,16 @@ impl<'a> FunctionCompiler<'a> {
         if values.is_empty() {
             return Ok(());
         }
+        for name in names {
+            let BindingTarget::Global { environment, .. } =
+                self.find_name_target(&name.name, span, true)?
+            else {
+                return Err(KError::bytecode(
+                    "global declaration is not a global binding",
+                ));
+            };
+            self.emit_check_environment(environment, &name.name)?;
+        }
         let start = Register::new(self.next_temp);
         let written = self.compile_value_list_into(start, values, Some(names.len()), false)?;
         for (index, name) in names.iter().enumerate() {
@@ -1083,6 +1093,7 @@ impl<'a> FunctionCompiler<'a> {
                 self.instructions.push(Instruction::LoadNil { dst: target });
                 written = written.saturating_add(1);
             }
+            self.reserve_temp_space(start, total)?;
         }
 
         Ok(written)
@@ -1587,6 +1598,19 @@ impl<'a> FunctionCompiler<'a> {
         let key = self.load_string_temp(name.as_bytes().to_vec())?;
         self.instructions
             .push(Instruction::SetTable { table, key, value });
+        Ok(())
+    }
+
+    fn emit_check_environment(
+        &mut self,
+        environment: EnvironmentTarget,
+        name: &str,
+    ) -> KResult<()> {
+        let table = self.alloc_temp()?;
+        self.load_environment(environment, table)?;
+        let key = self.load_string_temp(name.as_bytes().to_vec())?;
+        self.instructions
+            .push(Instruction::CheckGlobal { table, key });
         Ok(())
     }
 

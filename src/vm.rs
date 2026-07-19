@@ -3674,6 +3674,27 @@ impl Vm {
         self.newindex_value(value, key, next, 0)
     }
 
+    fn check_global_unset(&self, table: Value, key: Value) -> KResult<()> {
+        let Value::Table(table) = table else {
+            return Err(self.type_error("table expected", table));
+        };
+        let Value::String(name) = key else {
+            return Err(Self::runtime_error("global name must be a string"));
+        };
+        if !matches!(
+            self.heap
+                .resolve_table(table)?
+                .raw_get(Value::string(name))?,
+            Value::Nil
+        ) {
+            return Err(Self::runtime_error(format!(
+                "global '{}' already defined",
+                self.string_text_from_handle(name)?
+            )));
+        }
+        Ok(())
+    }
+
     fn index_value(&mut self, value: Value, key: Value, depth: usize) -> KResult<Value> {
         let mut visited = Vec::new();
         self.index_value_inner(value, key, depth, &mut visited)
@@ -4988,6 +5009,12 @@ impl Vm {
             Instruction::SetGlobal { src, name } => {
                 let value = self.read_register(frame_index, src)?;
                 self.set_global(frame_index, name, value)?;
+                self.advance_pc(frame_index)?;
+            }
+            Instruction::CheckGlobal { table, key } => {
+                let table = self.read_register(frame_index, table)?;
+                let key = self.read_register(frame_index, key)?;
+                self.check_global_unset(table, key)?;
                 self.advance_pc(frame_index)?;
             }
             Instruction::GetTable { dst, table, key } => {

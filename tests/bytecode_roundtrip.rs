@@ -38,6 +38,10 @@ fn sample_instructions() -> KResult<Vec<Instruction>> {
             src: Register::new(8),
             name: ConstantIndex::new(9),
         },
+        Instruction::CheckGlobal {
+            table: Register::new(8),
+            key: Register::new(9),
+        },
         Instruction::GetTable {
             dst: Register::new(9),
             table: Register::new(10),

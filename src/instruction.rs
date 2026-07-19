@@ -232,6 +232,10 @@ pub enum Instruction {
         src: Register,
         name: ConstantIndex,
     },
+    CheckGlobal {
+        table: Register,
+        key: Register,
+    },
     GetTable {
         dst: Register,
         table: Register,
@@ -358,6 +362,7 @@ enum Opcode {
     TailCall = 26,
     Unary = 27,
     SetTableRange = 28,
+    CheckGlobal = 29,
 }
 
 impl Opcode {
@@ -392,6 +397,7 @@ impl Opcode {
             26 => Ok(Self::TailCall),
             27 => Ok(Self::Unary),
             28 => Ok(Self::SetTableRange),
+            29 => Ok(Self::CheckGlobal),
             _ => Err(KError::bytecode(format!("unknown opcode {value}"))),
         }
     }
@@ -453,6 +459,11 @@ impl Instruction {
                 writer.write_u8(Opcode::SetGlobal as u8);
                 write_register(writer, *src);
                 write_constant_index(writer, *name);
+            }
+            Self::CheckGlobal { table, key } => {
+                writer.write_u8(Opcode::CheckGlobal as u8);
+                write_register(writer, *table);
+                write_register(writer, *key);
             }
             Self::GetTable { dst, table, key } => {
                 writer.write_u8(Opcode::GetTable as u8);
@@ -634,6 +645,10 @@ impl Instruction {
             Opcode::SetGlobal => Ok(Self::SetGlobal {
                 src: read_register(reader)?,
                 name: read_constant_index(reader)?,
+            }),
+            Opcode::CheckGlobal => Ok(Self::CheckGlobal {
+                table: read_register(reader)?,
+                key: read_register(reader)?,
             }),
             Opcode::GetTable => Ok(Self::GetTable {
                 dst: read_register(reader)?,
