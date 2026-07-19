@@ -470,6 +470,18 @@ impl Resolver {
         state: &mut FunctionState,
         is_write: bool,
     ) -> KResult<BindingTarget> {
+        if state.global_declared_in_current_block(name) {
+            let (binding, _explicit) = state.lookup_global(name, span)?;
+            if !matches!(binding, BindingTarget::Global { readonly: false, .. }) && is_write {
+                return Err(KError::syntax(
+                    format!("attempt to assign to const variable '{name}'"),
+                    span,
+                ));
+            }
+            state.record_use(name.to_owned(), span, is_write, binding.clone());
+            return Ok(binding);
+        }
+
         if let Some(binding) = state.lookup_local_or_upvalue(name) {
             if is_write && binding.readonly {
                 return Err(KError::syntax(
@@ -477,7 +489,18 @@ impl Resolver {
                     span,
                 ));
             }
-            let target = if binding.source_depth == 0 {
+            let target = if name == "_ENV"
+                && matches!(state.kind, FunctionKind::Chunk)
+                && binding.source_depth == 0
+                && binding.declaration_span == state.span
+            {
+                BindingTarget::Upvalue {
+                    slot: 0,
+                    readonly: false,
+                    source_depth: 0,
+                    declaration_span: binding.declaration_span,
+                }
+            } else if binding.source_depth == 0 {
                 BindingTarget::Local {
                     slot: binding.slot,
                     readonly: binding.readonly,
@@ -495,6 +518,13 @@ impl Resolver {
             };
             state.record_use(name.to_owned(), span, is_write, target.clone());
             return Ok(target);
+        }
+
+        if matches!(state.kind, FunctionKind::GlobalFunction) && state.globals.contains_key(name)
+        {
+            let (binding, _explicit) = state.lookup_global(name, span)?;
+            state.record_use(name.to_owned(), span, is_write, binding.clone());
+            return Ok(binding);
         }
 
         if let Some((binding, source_depth)) = state.lookup_outer_capture(name) {

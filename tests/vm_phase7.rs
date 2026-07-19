@@ -127,6 +127,24 @@ fn global_keyword_can_be_a_user_mode_assignment_name() -> Result<(), Box<dyn std
 }
 
 #[test]
+fn global_function_body_uses_its_declared_global() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "global print; local f = 20; do global function f(x) if x == 0 then return 1 end return 2 * f(x - 1) end; print(f(4)) end; print(_ENV.f(4), f)".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"16\n16\t20\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn floating_division_by_zero_returns_ieee_values() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
         args: vec![

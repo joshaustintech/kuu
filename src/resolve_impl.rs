@@ -572,6 +572,12 @@ impl FunctionState {
         self.visible_bindings.get(name).cloned()
     }
 
+    pub(crate) fn global_declared_in_current_block(&self, name: &str) -> bool {
+        self.block_frames
+            .last()
+            .is_some_and(|frame| frame.global_undos.iter().any(|(declared, _)| declared == name))
+    }
+
     pub(crate) fn lookup_outer_capture(&self, name: &str) -> Option<(Binding, usize)> {
         for snapshot in self.ancestor_scopes.iter().rev() {
             if let Some(binding) = snapshot.bindings.get(name) {
