@@ -335,6 +335,24 @@ fn string_pack_and_unpack_native_float() -> Result<(), Box<dyn std::error::Error
 }
 
 #[test]
+fn require_returns_coroutine_module_table() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "print(require('coroutine') == coroutine, type(coroutine))".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"true\ttable\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn literal_integer_floor_division_by_zero_errors_when_called()
 -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {

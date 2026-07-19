@@ -5541,6 +5541,7 @@ impl Vm {
         self.install_utf8_lib()?;
         self.install_table_lib()?;
         self.install_math_lib()?;
+        self.install_coroutine_lib()?;
         self.install_io_lib()?;
         self.install_os_lib()?;
         self.install_package_lib()?;
@@ -5664,6 +5665,11 @@ impl Vm {
         self.set_module_value(table, b"maxinteger", Value::integer(i64::MAX))?;
         self.set_module_value(table, b"mininteger", Value::integer(i64::MIN))?;
         Ok(())
+    }
+
+    fn install_coroutine_lib(&mut self) -> KResult<()> {
+        let table = self.heap.new_table()?;
+        self.set_module_table("coroutine", table)
     }
 
     fn install_io_lib(&mut self) -> KResult<()> {
