@@ -2576,6 +2576,41 @@ pub fn native_debug_upvalueid(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>
     )?)])
 }
 
+pub fn native_debug_getinfo(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let level = vm.integer_arg(args, 0, "debug.getinfo expects a stack level")?;
+    if level < 1 {
+        return Ok(vec![Value::nil()]);
+    }
+    let level = usize::try_from(level)
+        .map_err(|_| Vm::runtime_error("debug.getinfo stack level overflow"))?;
+    let Some(frame_index) = vm.frames.len().checked_sub(level) else {
+        return Ok(vec![Value::nil()]);
+    };
+    let options = match vm.arg_or_nil(args, 1) {
+        Value::Nil => b"flnSrut".to_vec(),
+        Value::String(handle) => vm.string_bytes_from_handle(handle)?,
+        value => return Err(vm.type_error("string expected", value)),
+    };
+    let table = vm.new_table_handle()?;
+    if options.contains(&b't') {
+        let extraargs = vm
+            .frames
+            .get(frame_index)
+            .ok_or_else(|| Vm::runtime_error("debug frame disappeared"))?
+            .varargs
+            .len();
+        let extraargs = i64::try_from(extraargs)
+            .map_err(|_| Vm::runtime_error("debug extra argument count overflow"))?;
+        let key = vm.heap.intern_string(b"extraargs".to_vec())?;
+        vm.table_set(
+            Value::table(table),
+            Value::string(key),
+            Value::integer(extraargs),
+        )?;
+    }
+    Ok(vec![Value::table(table)])
+}
+
 stub_native!(
     native_string_gmatch,
     native_utf8_char,
@@ -2589,7 +2624,6 @@ stub_native!(
     native_io_lines,
     native_package_loadlib,
     native_debug_traceback,
-    native_debug_getinfo,
     native_debug_getupvalue,
     native_debug_setupvalue,
     native_debug_upvaluejoin,

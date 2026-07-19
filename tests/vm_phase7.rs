@@ -615,6 +615,25 @@ fn table_pack_preserves_nil_positions_and_explicit_length() -> Result<(), Box<dy
 }
 
 #[test]
+fn debug_getinfo_t_reports_current_function_extraargs() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local function inspect(...) return debug.getinfo(1, 't').extraargs end; print(inspect(1, nil, 3))"
+                .to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"3\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn table_concat_joins_range_with_separator() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
         args: vec![
