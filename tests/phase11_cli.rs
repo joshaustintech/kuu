@@ -74,6 +74,26 @@ fn integer_overflow_wraps() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 #[test]
+fn omitted_function_parameters_are_nil() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local function f(x) return x == nil end; print(f())".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+
+    let expected = ExpectedRun {
+        stdout: b"true\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+
+    assert!(compare_run(&actual, &expected).is_ok());
+    Ok(())
+}
+
+#[test]
 fn string_packsize_reports_lua_integer_width() -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
         args: vec!["-e".to_owned(), "print(string.packsize('j'))".to_owned()],

@@ -2933,12 +2933,9 @@ impl Vm {
 
         if args.len() < parameter_count {
             for index in args.len()..parameter_count {
-                let slot = base
-                    .checked_add(1)
-                    .and_then(|start| start.checked_add(index))
-                    .ok_or_else(|| {
-                        KError::new(KErrorKind::Runtime("stack overflow".to_owned()), None)
-                    })?;
+                let slot = base.checked_add(index).ok_or_else(|| {
+                    KError::new(KErrorKind::Runtime("stack overflow".to_owned()), None)
+                })?;
                 if let Some(place) = self.stack.get_mut(slot) {
                     *place = Value::nil();
                 }
@@ -2995,12 +2992,9 @@ impl Vm {
 
         if args.len() < parameter_count {
             for index in args.len()..parameter_count {
-                let slot = base
-                    .checked_add(1)
-                    .and_then(|start| start.checked_add(index))
-                    .ok_or_else(|| {
-                        KError::new(KErrorKind::Runtime("stack overflow".to_owned()), None)
-                    })?;
+                let slot = base.checked_add(index).ok_or_else(|| {
+                    KError::new(KErrorKind::Runtime("stack overflow".to_owned()), None)
+                })?;
                 if let Some(place) = self.stack.get_mut(slot) {
                     *place = Value::nil();
                 }
