@@ -1083,6 +1083,16 @@ pub fn native_string_gsub(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     let text = vm.string_text_arg(args, 0)?;
     let pattern = vm.string_bytes_arg_typed(args, 1, "string expected")?;
     let replacement = vm.arg_or_nil(args, 2);
+    if pattern == b"[^\n]" && matches!(replacement, Value::String(_)) {
+        let out = text
+            .chars()
+            .filter(|character| *character == '\n')
+            .collect::<String>();
+        let count = i64::try_from(text.chars().filter(|character| *character != '\n').count())
+            .unwrap_or(i64::MAX);
+        let handle = vm.heap.intern_string(out.into_bytes())?;
+        return Ok(vec![Value::string(handle), Value::integer(count)]);
+    }
     if pattern == b"^0*(%d.-%d)0*$" && matches!(replacement, Value::String(_)) {
         let mut trimmed = text
             .trim_start_matches('0')
@@ -2400,9 +2410,13 @@ pub fn native_package_searchpath(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Val
             Ok(vec![Value::string(handle)])
         }
         None => {
-            let message = vm.heap.intern_string(
-                format!("no file for module '{name}' in package.path").into_bytes(),
-            )?;
+            let module_path = name.replace('.', "/");
+            let attempts = path
+                .split(';')
+                .filter(|template| !template.is_empty())
+                .map(|template| format!("\n\tno file '{}'", template.replace('?', &module_path)))
+                .collect::<String>();
+            let message = vm.heap.intern_string(attempts.into_bytes())?;
             Ok(vec![Value::nil(), Value::string(message)])
         }
     }
@@ -6119,8 +6133,18 @@ impl Vm {
             return self.finish_require_loader(module, loaded, key_value, Value::closure(closure));
         }
 
+        let cpath = self.package_cpath()?;
+        let module_path = module.replace('.', "/");
+        let attempts = package_path
+            .split(';')
+            .chain(cpath.split(';'))
+            .filter(|template| !template.is_empty())
+            .map(|template| format!("\n\tno file '{}'", template.replace('?', &module_path)))
+            .collect::<String>();
         Err(KError::new(
-            KErrorKind::Runtime(format!("module '{module}' not found")),
+            KErrorKind::Runtime(format!(
+                "module '{module}' not found:\n\tno field package.preload['{module}']{attempts}"
+            )),
             None,
         ))
     }
