@@ -5,6 +5,10 @@ use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
+
+const DEFAULT_PROCESS_TIMEOUT: Duration = Duration::from_secs(10);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunResult {
@@ -13,13 +17,27 @@ pub struct RunResult {
     pub status: ExitStatus,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunOptions {
     pub args: Vec<String>,
     pub stdin: Vec<u8>,
     pub current_dir: Option<PathBuf>,
     pub env: Vec<(String, String)>,
     pub clear_env: bool,
+    pub timeout: Duration,
+}
+
+impl Default for RunOptions {
+    fn default() -> Self {
+        Self {
+            args: Vec::new(),
+            stdin: Vec::new(),
+            current_dir: None,
+            env: Vec::new(),
+            clear_env: false,
+            timeout: DEFAULT_PROCESS_TIMEOUT,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -40,6 +58,10 @@ pub enum HarnessError {
     StdinWrite {
         binary: PathBuf,
         source: String,
+    },
+    TimedOut {
+        binary: PathBuf,
+        timeout: Duration,
     },
     OutputMismatch {
         field: &'static str,
@@ -68,6 +90,12 @@ impl fmt::Display for HarnessError {
                     source
                 )
             }
+            Self::TimedOut { binary, timeout } => write!(
+                f,
+                "{} did not exit within {} ms; process was terminated",
+                binary.display(),
+                timeout.as_millis()
+            ),
             Self::OutputMismatch {
                 field,
                 expected,
@@ -123,27 +151,11 @@ pub fn run_binary_with(options: RunOptions) -> Result<RunResult, HarnessError> {
     for (key, value) in &options.env {
         command.env(key, value);
     }
-    if options.stdin.is_empty() {
-        let output = match command.output() {
-            Ok(output) => output,
-            Err(error) => {
-                return Err(HarnessError::Spawn {
-                    binary,
-                    source: error.to_string(),
-                });
-            }
-        };
-
-        return Ok(RunResult {
-            stdout: output.stdout,
-            stderr: output.stderr,
-            status: output.status,
-        });
-    }
-
-    command.stdin(Stdio::piped());
     command.stdout(Stdio::piped());
     command.stderr(Stdio::piped());
+    if !options.stdin.is_empty() {
+        command.stdin(Stdio::piped());
+    }
     let mut child = match command.spawn() {
         Ok(child) => child,
         Err(error) => {
@@ -154,14 +166,36 @@ pub fn run_binary_with(options: RunOptions) -> Result<RunResult, HarnessError> {
         }
     };
 
-    let mut stdin = child.stdin.take().ok_or(HarnessError::StdinUnavailable)?;
-    stdin
-        .write_all(&options.stdin)
-        .map_err(|error| HarnessError::StdinWrite {
+    if !options.stdin.is_empty() {
+        let mut stdin = child.stdin.take().ok_or(HarnessError::StdinUnavailable)?;
+        stdin
+            .write_all(&options.stdin)
+            .map_err(|error| HarnessError::StdinWrite {
+                binary: binary.clone(),
+                source: error.to_string(),
+            })?;
+        drop(stdin);
+    }
+
+    let deadline = Instant::now() + options.timeout;
+    loop {
+        let finished = child.try_wait().map_err(|error| HarnessError::Spawn {
             binary: binary.clone(),
             source: error.to_string(),
         })?;
-    drop(stdin);
+        if finished.is_some() {
+            break;
+        }
+        if Instant::now() >= deadline {
+            let _ = child.kill();
+            let _ = child.wait_with_output();
+            return Err(HarnessError::TimedOut {
+                binary,
+                timeout: options.timeout,
+            });
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
 
     let output = child
         .wait_with_output()

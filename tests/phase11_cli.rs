@@ -1,6 +1,7 @@
 mod support;
 
-use support::{ExpectedRun, RunOptions, TempDir, compare_run, run_binary_with};
+use std::time::Duration;
+use support::{ExpectedRun, HarnessError, RunOptions, TempDir, compare_run, run_binary_with};
 
 #[test]
 fn stdin_is_executed_as_a_file_without_arguments() -> Result<(), Box<dyn std::error::Error>> {
@@ -16,6 +17,18 @@ fn stdin_is_executed_as_a_file_without_arguments() -> Result<(), Box<dyn std::er
     };
 
     assert!(compare_run(&actual, &expected).is_ok());
+    Ok(())
+}
+
+#[test]
+fn process_harness_kills_and_reports_a_hung_kuu() -> Result<(), Box<dyn std::error::Error>> {
+    let result = run_binary_with(RunOptions {
+        args: vec!["-e".to_owned(), "while true do end".to_owned()],
+        timeout: Duration::from_millis(100),
+        ..RunOptions::default()
+    });
+
+    assert!(matches!(result, Err(HarnessError::TimedOut { .. })));
     Ok(())
 }
 
