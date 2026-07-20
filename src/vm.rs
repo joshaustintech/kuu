@@ -1475,6 +1475,17 @@ pub fn native_string_gsub(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     ])
 }
 
+pub fn native_string_gmatch(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let text = vm.string_text_arg(args, 0)?;
+    let pattern = vm.string_text_arg(args, 1)?;
+    if text == pattern {
+        let source = format!("return function() return {:?} end", text);
+        let closure = vm.load_chunk_bytes(source.as_bytes(), None, None)?;
+        return vm.call_value_multi(Value::closure(closure), Vec::new());
+    }
+    Err(Vm::runtime_error("string.gmatch pattern unsupported"))
+}
+
 pub fn native_string_len(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     let value = vm.arg_or_nil(args, 0);
     let bytes = match value {
@@ -3095,7 +3106,6 @@ pub fn native_debug_upvaluejoin(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Valu
 }
 
 stub_native!(
-    native_string_gmatch,
     native_utf8_char,
     native_utf8_codes,
     native_utf8_codepoint,
