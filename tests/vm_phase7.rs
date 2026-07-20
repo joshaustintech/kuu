@@ -1025,6 +1025,26 @@ fn string_gmatch_exact_pattern_returns_callable_iterator() -> Result<(), Box<dyn
 }
 
 #[test]
+fn table_create_returns_empty_table_without_changing_length()
+-> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local t = table.create(10000); print(type(t), #t); t[1] = 7; print(#t, t[1])"
+                .to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"table\t0\n1\t7\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn collectgarbage_terminates_on_unreachable_closure_cycles()
 -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {

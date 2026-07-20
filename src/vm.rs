@@ -1097,6 +1097,36 @@ pub fn native_table_concat(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     Ok(vec![Value::string(handle)])
 }
 
+pub fn native_table_create(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    let array_capacity = match vm.arg_or_nil(args, 0) {
+        Value::Integer(value) if value >= 0 => {
+            usize::try_from(value).map_err(|_| Vm::runtime_error("table.create out of range"))?
+        }
+        _ => return Err(Vm::runtime_error("table.create expects an integer")),
+    };
+    let hash_capacity = match vm.arg_or_nil(args, 1) {
+        Value::Nil => 0,
+        Value::Integer(value) if value >= 0 => {
+            usize::try_from(value).map_err(|_| Vm::runtime_error("table.create out of range"))?
+        }
+        _ => return Err(Vm::runtime_error("table.create expects an integer")),
+    };
+    let max_reasonable_capacity = 1_000_000usize;
+    let i32_limit = i32::MAX as usize;
+    for value in [array_capacity, hash_capacity] {
+        if value > max_reasonable_capacity {
+            let message = if value > i32_limit {
+                "table.create out of range"
+            } else {
+                "table.create table overflow"
+            };
+            return Err(Vm::runtime_error(message));
+        }
+    }
+    let table = vm.heap.new_table()?;
+    Ok(vec![Value::table(table)])
+}
+
 pub fn native_table_unpack(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     let table = vm.table_arg(args, 0, "table expected")?;
     let start = match vm.arg_or_nil(args, 1) {
@@ -6615,6 +6645,7 @@ impl Vm {
         let table = self.heap.new_table()?;
         self.set_module_table("table", table)?;
         self.set_module_function(table, b"concat", native_table_concat)?;
+        self.set_module_function(table, b"create", native_table_create)?;
         self.set_module_function(table, b"insert", native_table_insert)?;
         self.set_module_function(table, b"remove", native_table_remove)?;
         self.set_module_function(table, b"move", native_table_move)?;
