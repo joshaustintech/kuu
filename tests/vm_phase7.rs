@@ -969,6 +969,24 @@ fn loaded_chunks_reject_more_than_254_returns() -> Result<(), Box<dyn std::error
 }
 
 #[test]
+fn string_sub_zero_end_is_empty_for_binary_strings() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local value = string.char(0, 1, 2); print(#string.sub(value, 1, 0), #string.sub(value, 2, -1))".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"0\t2\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn collectgarbage_terminates_on_unreachable_closure_cycles()
 -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {

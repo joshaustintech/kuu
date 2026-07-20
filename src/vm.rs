@@ -1361,9 +1361,22 @@ pub fn native_string_match(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
 }
 
 pub fn native_string_gsub(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
-    let text = vm.string_text_arg(args, 0)?;
+    let raw_text = vm.string_bytes_arg_typed(args, 0, "string expected")?;
     let pattern = vm.string_bytes_arg_typed(args, 1, "string expected")?;
     let replacement = vm.arg_or_nil(args, 2);
+    if !matches!(replacement, Value::String(_)) && std::str::from_utf8(&raw_text).is_err() {
+        let count = raw_text
+            .windows(pattern.len())
+            .filter(|window| *window == pattern.as_slice())
+            .count()
+            .saturating_add(1);
+        let handle = vm.heap.intern_string(raw_text)?;
+        return Ok(vec![
+            Value::string(handle),
+            Value::integer(i64::try_from(count).unwrap_or(i64::MAX)),
+        ]);
+    }
+    let text = String::from_utf8_lossy(&raw_text).into_owned();
     if pattern == b"[^\n]" && matches!(replacement, Value::String(_)) {
         let out = text
             .chars()
@@ -1501,6 +1514,7 @@ pub fn native_string_sub(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
         _ => 1,
     };
     let end = match vm.arg_or_nil(args, 2) {
+        Value::Integer(0) => 0,
         Value::Integer(value) => normalize_lua_index(value, len, len),
         _ => len,
     };
