@@ -1220,7 +1220,13 @@ pub fn native_table_move(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
     if end < start {
         return Ok(vec![Value::table(destination)]);
     }
-    if end.saturating_sub(start) >= 100_000 {
+    let span = end.saturating_sub(start);
+    if span < i64::MAX {
+        target
+            .checked_add(span)
+            .ok_or_else(|| Vm::runtime_error("wrap around"))?;
+    }
+    if span >= 100_000 {
         let source_has_metatable = vm.heap.resolve_table(source)?.metatable.is_some();
         let destination_has_metatable = vm.heap.resolve_table(destination)?.metatable.is_some();
         if !source_has_metatable && !destination_has_metatable {

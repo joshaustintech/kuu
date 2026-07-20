@@ -1120,6 +1120,26 @@ fn pcall_preserves_non_string_error_objects() -> Result<(), Box<dyn std::error::
 }
 
 #[test]
+fn table_move_reports_destination_wraparound_before_result_limit()
+-> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local ok, err = pcall(table.move, {}, 1, math.maxinteger, 2); print(ok, err:find('wrap around') ~= nil)"
+                .to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"false\ttrue\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn collectgarbage_terminates_on_unreachable_closure_cycles()
 -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
