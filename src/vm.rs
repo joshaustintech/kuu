@@ -132,6 +132,7 @@ struct LineIteratorObject {
 struct TableObject {
     array: Vec<Value>,
     hash: BTreeMap<LuaKey, Value>,
+    reserved_hash: usize,
     metatable: Option<TableHandle>,
     marked: bool,
     finalizer_ran: bool,
@@ -142,6 +143,7 @@ impl TableObject {
         Self {
             array: Vec::new(),
             hash: BTreeMap::new(),
+            reserved_hash: 0,
             metatable: None,
             marked: false,
             finalizer_ran: false,
@@ -1124,7 +1126,116 @@ pub fn native_table_create(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
         }
     }
     let table = vm.heap.new_table()?;
+    vm.heap
+        .resolve_table_mut(table)?
+        .array
+        .reserve(array_capacity);
+    vm.heap.resolve_table_mut(table)?.reserved_hash = hash_capacity;
+    vm.gc_mark_table(table);
     Ok(vec![Value::table(table)])
+}
+
+pub fn native_table_insert(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    if args.len() != 2 && args.len() != 3 {
+        return Err(Vm::runtime_error(
+            "wrong number of arguments to table.insert",
+        ));
+    }
+    let table = vm.table_arg(args, 0, "table expected")?;
+    let length_value = vm.length(Value::table(table), 0)?;
+    let length = match length_value {
+        Value::Integer(value) if value >= 0 => usize::try_from(value)
+            .map_err(|_| Vm::runtime_error("object length is not an integer"))?,
+        Value::Number(value) if value >= 0.0 && value.fract() == 0.0 => {
+            usize::try_from(value as u64)
+                .map_err(|_| Vm::runtime_error("object length is not an integer"))?
+        }
+        _ => return Err(Vm::runtime_error("object length is not an integer")),
+    };
+    let (position, value) = if args.len() == 2 {
+        (
+            length
+                .checked_add(1)
+                .ok_or_else(|| Vm::runtime_error("table index overflow"))?,
+            args.get(1)
+                .copied()
+                .ok_or_else(|| Vm::runtime_error("missing table.insert value"))?,
+        )
+    } else {
+        let position = usize::try_from(vm.integer_arg(args, 1, "position out of bounds")?)
+            .map_err(|_| Vm::runtime_error("position out of bounds"))?;
+        (
+            position,
+            args.get(2)
+                .copied()
+                .ok_or_else(|| Vm::runtime_error("missing table.insert value"))?,
+        )
+    };
+    if position == 0 || position > length.saturating_add(1) {
+        return Err(Vm::runtime_error("position out of bounds"));
+    }
+    for index in (position..=length).rev() {
+        let current = vm.heap.resolve_table(table)?.raw_get(Value::integer(
+            i64::try_from(index).map_err(|_| Vm::runtime_error("table index overflow"))?,
+        ))?;
+        vm.heap.resolve_table_mut(table)?.raw_set(
+            Value::integer(
+                i64::try_from(index + 1).map_err(|_| Vm::runtime_error("table index overflow"))?,
+            ),
+            current,
+        )?;
+    }
+    vm.heap.resolve_table_mut(table)?.raw_set(
+        Value::integer(
+            i64::try_from(position).map_err(|_| Vm::runtime_error("table index overflow"))?,
+        ),
+        value,
+    )?;
+    Ok(Vec::new())
+}
+
+pub fn native_table_move(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
+    if args.len() < 4 || args.len() > 5 {
+        return Err(Vm::runtime_error("wrong number of arguments to table.move"));
+    }
+    let source = vm.table_arg(args, 0, "table expected")?;
+    let start = vm.integer_arg(args, 1, "integer expected")?;
+    let end = vm.integer_arg(args, 2, "integer expected")?;
+    let target = vm.integer_arg(args, 3, "integer expected")?;
+    let destination = if args.len() == 5 {
+        vm.table_arg(args, 4, "table expected")?
+    } else {
+        source
+    };
+    if end < start {
+        return Ok(vec![Value::table(destination)]);
+    }
+    if end.saturating_sub(start) >= 100_000 {
+        return Err(Vm::runtime_error("too many results"));
+    }
+    let count = usize::try_from(end.saturating_sub(start).saturating_add(1))
+        .map_err(|_| Vm::runtime_error("table index overflow"))?;
+    let backward = source == destination && target > start && target < end.saturating_add(1);
+    let offsets: Box<dyn Iterator<Item = usize>> = if backward {
+        Box::new((0..count).rev())
+    } else {
+        Box::new(0..count)
+    };
+    for offset in offsets {
+        let source_index = start
+            .checked_add(i64::try_from(offset).map_err(|_| Vm::runtime_error("wrap around"))?)
+            .ok_or_else(|| Vm::runtime_error("wrap around"))?;
+        let destination_index = target
+            .checked_add(i64::try_from(offset).map_err(|_| Vm::runtime_error("wrap around"))?)
+            .ok_or_else(|| Vm::runtime_error("wrap around"))?;
+        let value = vm.table_get(Value::table(source), Value::integer(source_index))?;
+        vm.table_set(
+            Value::table(destination),
+            Value::integer(destination_index),
+            value,
+        )?;
+    }
+    Ok(vec![Value::table(destination)])
 }
 
 pub fn native_table_unpack(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
@@ -1137,6 +1248,9 @@ pub fn native_table_unpack(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
         Value::Nil => i64::try_from(vm.heap.resolve_table(table)?.array.len()).unwrap_or(i64::MAX),
         _ => vm.integer_arg(args, 2, "integer expected")?,
     };
+    if end >= start && end.saturating_sub(start) >= 100_000 {
+        return Err(Vm::runtime_error("too many results"));
+    }
     let mut values = Vec::new();
     for index in start..=end {
         values.push(
@@ -3140,8 +3254,6 @@ stub_native!(
     native_utf8_codes,
     native_utf8_codepoint,
     native_utf8_len,
-    native_table_insert,
-    native_table_move,
     native_io_lines,
     native_package_loadlib,
     native_debug_traceback,
@@ -6153,8 +6265,9 @@ impl Vm {
             if let Some(table) = table.as_ref() {
                 bytes = bytes
                     .saturating_add(64)
-                    .saturating_add(table.array.len().saturating_mul(16))
-                    .saturating_add(table.hash.len().saturating_mul(32));
+                    .saturating_add(table.array.capacity().saturating_mul(16))
+                    .saturating_add(table.hash.len().saturating_mul(32))
+                    .saturating_add(table.reserved_hash.saturating_mul(32));
             }
         }
         for closure in &self.heap.closures {

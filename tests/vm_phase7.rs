@@ -1045,6 +1045,63 @@ fn table_create_returns_empty_table_without_changing_length()
 }
 
 #[test]
+fn table_insert_appends_and_shifts_values() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local t = {1, 3}; table.insert(t, 2, 2); table.insert(t, 4); print(t[1], t[2], t[3], t[4])"
+                .to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"1\t2\t3\t4\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
+fn table_unpack_rejects_unbounded_result_ranges() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local ok, err = pcall(table.unpack, {}, 0, math.maxinteger); print(ok, err:find('too many results') ~= nil)"
+                .to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"false\ttrue\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
+fn table_move_copies_ranges_with_overlap() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local t = {10, 20, 30}; table.move(t, 1, 3, 2); print(t[1], t[2], t[3], t[4])"
+                .to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"10\t10\t20\t30\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn collectgarbage_terminates_on_unreachable_closure_cycles()
 -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
