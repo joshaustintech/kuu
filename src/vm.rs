@@ -2903,17 +2903,19 @@ pub fn native_debug_upvalueid(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>
     };
     let index = vm.integer_arg(args, 1, "upvalue index expected")?;
     if index < 1 {
-        return Err(Vm::runtime_error("upvalue index out of range"));
+        return Ok(vec![Value::nil()]);
     }
     let closure = vm.heap.resolve_closure(closure)?;
-    let handle = closure
+    let Some(handle) = closure
         .upvalues
         .get(
             usize::try_from(index - 1)
                 .map_err(|_| Vm::runtime_error("upvalue index out of range"))?,
         )
         .copied()
-        .ok_or_else(|| Vm::runtime_error("upvalue index out of range"))?;
+    else {
+        return Ok(vec![Value::nil()]);
+    };
     Ok(vec![Value::integer(i64::try_from(handle.raw()).map_err(
         |_| Vm::runtime_error("upvalue identity exceeds Lua integer range"),
     )?)])

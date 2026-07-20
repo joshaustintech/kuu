@@ -987,6 +987,24 @@ fn string_sub_zero_end_is_empty_for_binary_strings() -> Result<(), Box<dyn std::
 }
 
 #[test]
+fn debug_upvalueid_out_of_range_returns_nil() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local function f() end; print(debug.upvalueid(f, 3) == nil)".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"true\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn collectgarbage_terminates_on_unreachable_closure_cycles()
 -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
