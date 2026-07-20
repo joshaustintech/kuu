@@ -933,6 +933,24 @@ fn truncated_lua_binary_payloads_report_truncation() -> Result<(), Box<dyn std::
 }
 
 #[test]
+fn corrupted_lua_binary_headers_are_rejected() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local c = string.dump(function() end); local corrupted = string.char(string.byte(c, 1) + 1) .. string.sub(c, 2, -1); print(load(corrupted) == nil)".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"true\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn collectgarbage_terminates_on_unreachable_closure_cycles()
 -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
