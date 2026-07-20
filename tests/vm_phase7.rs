@@ -1102,6 +1102,24 @@ fn table_move_copies_ranges_with_overlap() -> Result<(), Box<dyn std::error::Err
 }
 
 #[test]
+fn pcall_preserves_non_string_error_objects() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local t = {}; local ok, err = pcall(error, t); print(ok, err == t)".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"false\ttrue\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn collectgarbage_terminates_on_unreachable_closure_cycles()
 -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {

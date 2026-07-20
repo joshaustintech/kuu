@@ -628,7 +628,13 @@ pub fn native_assert(_vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
 }
 
 pub fn native_error(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
-    let message = match vm.arg_or_nil(args, 0) {
+    let value = vm.arg_or_nil(args, 0);
+    vm.pending_error_value = if matches!(value, Value::String(_) | Value::Nil) {
+        None
+    } else {
+        Some(value)
+    };
+    let message = match value {
         Value::String(handle) => vm.format_value(Value::String(handle))?,
         other => vm.format_value(other)?,
     };
@@ -839,6 +845,7 @@ pub fn native_pcall(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
             None,
         ));
     };
+    vm.pending_error_value = None;
     match vm.call_value_multi(callee, rest.to_vec()) {
         Ok(values) => {
             let mut out = Vec::with_capacity(values.len() + 1);
@@ -847,6 +854,9 @@ pub fn native_pcall(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
             Ok(out)
         }
         Err(error) => {
+            if let Some(value) = vm.pending_error_value.take() {
+                return Ok(vec![Value::boolean(false), value]);
+            }
             let text = match error.kind() {
                 KErrorKind::Runtime(message) => message.clone(),
                 _ => error.to_string(),
@@ -1211,7 +1221,11 @@ pub fn native_table_move(vm: &mut Vm, args: &[Value]) -> KResult<Vec<Value>> {
         return Ok(vec![Value::table(destination)]);
     }
     if end.saturating_sub(start) >= 100_000 {
-        return Err(Vm::runtime_error("too many results"));
+        let source_has_metatable = vm.heap.resolve_table(source)?.metatable.is_some();
+        let destination_has_metatable = vm.heap.resolve_table(destination)?.metatable.is_some();
+        if !source_has_metatable && !destination_has_metatable {
+            return Err(Vm::runtime_error("too many results"));
+        }
     }
     let count = usize::try_from(end.saturating_sub(start).saturating_add(1))
         .map_err(|_| Vm::runtime_error("table index overflow"))?;
@@ -3364,6 +3378,7 @@ enum GcPhase {
 pub struct Vm {
     heap: Heap,
     userdatas: Vec<Option<Rc<RefCell<UserdataObject>>>>,
+    pending_error_value: Option<Value>,
     warn_enabled: bool,
     start_instant: std::time::Instant,
     os_locale: String,
@@ -3399,6 +3414,7 @@ impl Vm {
         let mut vm = Self {
             heap,
             userdatas: Vec::new(),
+            pending_error_value: None,
             warn_enabled: false,
             start_instant: std::time::Instant::now(),
             os_locale: "C".to_owned(),
