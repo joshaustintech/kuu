@@ -399,6 +399,9 @@ impl<'a> FunctionCompiler<'a> {
             true,
         )?;
         self.emit_close_for_active_scopes()?;
+        if written > 254 {
+            return Err(KError::syntax("too many returns", return_stmt.span));
+        }
         self.instructions.push(Instruction::Return {
             first: start,
             count: u16::try_from(written)

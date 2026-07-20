@@ -951,6 +951,24 @@ fn corrupted_lua_binary_headers_are_rejected() -> Result<(), Box<dyn std::error:
 }
 
 #[test]
+fn loaded_chunks_reject_more_than_254_returns() -> Result<(), Box<dyn std::error::Error>> {
+    let actual = run_binary_with(RunOptions {
+        args: vec![
+            "-e".to_owned(),
+            "local code = 'return 10' .. string.rep(',10', 254); local f, message = load(code); print(f == nil, string.find(message, 'too many returns') ~= nil)".to_owned(),
+        ],
+        ..RunOptions::default()
+    })?;
+    let expected = ExpectedRun {
+        stdout: b"true\ttrue\n",
+        stderr: b"",
+        exit_code: Some(0),
+    };
+    compare_run(&actual, &expected)?;
+    Ok(())
+}
+
+#[test]
 fn collectgarbage_terminates_on_unreachable_closure_cycles()
 -> Result<(), Box<dyn std::error::Error>> {
     let actual = run_binary_with(RunOptions {
